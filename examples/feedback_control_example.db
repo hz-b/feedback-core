@@ -1,0 +1,288 @@
+#################################################################
+# 	devLiFeedback.c						#
+#################################################################
+record(longin, "$(IOC_NAME):init")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Open Common Feedback")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@INIT")
+}
+record(longin, "$(IOC_NAME):open")
+{
+	field(SCAN, "Passive")
+#	field(EVNT, "65")
+	field(DESC, "Open Common Feedback")
+	field(DTYP, "GETFB COMMON")
+#	field(PINI, "YES")
+	field(INP, "@OPEN")
+}
+record(longin, "$(IOC_NAME):close")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Close Common Feedback")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@CLOSE")
+}
+record(longin, "$(IOC_NAME):inputNode")
+{
+	field(SCAN, "1 second")
+	field(DESC, "Get Feedback Inode")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@INODE")
+}
+record(longin, "$(IOC_NAME):outputNode")
+{
+	field(SCAN, "1 second")
+	field(DESC, "Get Feedback ONode")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@ONODE")
+	field(FLNK, "$(IOC_NAME):liVAL")
+}
+record(longin, "$(IOC_NAME):parameterValue")
+{
+	field(DESC, "Get Feedback lval")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@VAL")
+}
+record(longin, "$(IOC_NAME):trigger")
+{
+	#field(SCAN, ".1 second")
+	field(DESC, "Get Feedback ONode")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@TRIGGER")
+}
+record(longin, "$(IOC_NAME):inputSignal")
+{
+	field(SCAN, "Passive")
+	field(PINI, "YES")
+	field(DESC, "Get Input Signal")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@ISIG")
+}
+record(longin, "$(IOC_NAME):outputSignal")
+{
+	field(SCAN, "Passive")
+	field(PINI, "YES")
+	field(DESC, "Get Input Signal")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@OSIG")
+}
+record(longin, "$(IOC_NAME):clkRate")
+{
+	field(SCAN, "Passive")
+	field(PINI, "1")
+	field(DESC, "Get Rate")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@RATE")
+}
+record(longin, "$(IOC_NAME):softTaskRate")
+{
+	field(SCAN, "Passive")
+	field(PINI, "1")
+	field(DESC, "Get Rate")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@SOFTTRIGGERRATE")
+}
+record(longin, "$(IOC_NAME):taskPriority")
+{
+	field(SCAN, "Passive")
+	field(PINI, "1")
+	field(DESC, "Get Priority")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@PRIORITY")
+}
+record(longin, "$(IOC_NAME):status")
+{
+	field(SCAN, "1 second")
+	field(DESC, "Get Status")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@STATUS")
+	field(HIHI, "1")
+	field(HIGH, "0")
+	field(LOW, "-2")
+	field(LOLO, "-2")
+	field(HHSV, "MAJOR")
+	field(HSV, "MINOR")
+	field(LSV, "MINOR")
+	field(LLSV, "MAJOR")
+	field(FLNK, "$(IOC_NAME):mbbiStatus")
+}
+record(mbbi,"$(IOC_NAME):mbbiStatus") 
+{
+    	field(SCAN,"Passive")
+	field(DTYP,"Raw Soft Channel")
+	field(INP, "$(IOC_NAME):liSTATUS NPP MS")
+        field(ZRST,"MEASURE")
+        field(ONST,"IDLE")
+        field(ZRVL,"0")
+        field(ONVL,"-1")
+}
+record(longin, "$(IOC_NAME):flags")
+{
+       field(SCAN, "1 second")
+#        field(SCAN, "Event")
+#        field(EVNT, "82")
+	field(DESC, "Get Flags")
+	field(DTYP, "GETFB COMMON")
+	field(INP, "@FLAGS")
+	field(FLNK,"$(IOC_NAME):mbbiFlags") 
+}
+record(mbbi,"$(IOC_NAME):mbbiFlags") 
+{
+    	field(SCAN,"Passive")
+	field(DTYP,"Raw Soft Channel")
+	field(INP, "$(IOC_NAME):liFLAGS PP NMS")
+        field(ZRST,"Ready")
+        field(ONST,"Wait")
+        field(TWST,"Acquire")
+	field(THST,"Finished")
+	field(FRST,"Incomplete")
+	field(FVST,"Error")
+	field(SXST,"Stop")
+        field(ZRVL,"0")
+        field(ONVL,"1")
+        field(TWVL,"2")
+        field(THVL,"3")
+        field(FRVL,"4")
+	field(FVVL,"5")
+	field(SXVL,"6")
+}
+#################################################################
+# 	devLoFeedback.c						#
+#################################################################
+record(longout, "$(IOC_NAME):setParameterValue")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Set Parameter")
+	field(DTYP, "SETFB COMMON")
+	field(OUT, "@VAL")
+}
+record(longout, "$(IOC_NAME):setInputNode")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Set Input Node")
+	field(DTYP, "SETFB COMMON")
+	field(OUT, "@INODE")
+	field(HOPR, "7")
+	field(LOPR, "0")
+	field(HIHI, "8")
+	field(HIGH, "8")
+	field(LOW, "-1")
+	field(LOLO, "-1")
+	field(HHSV, "MAJOR")
+	field(HSV, "MINOR")
+	field(LSV, "MINOR")
+	field(LLSV, "MAJOR")
+}
+record(longout, "$(IOC_NAME):setOutputNode")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Set Output Signal")
+	field(DTYP, "SETFB COMMON")
+	field(OUT, "@ONODE")
+	field(HOPR, "7")
+	field(LOPR, "0")
+	field(HIHI, "8")
+	field(HIGH, "8")
+	field(LOW, "-1")
+	field(LOLO, "-1")
+	field(HHSV, "MAJOR")
+	field(HSV, "MINOR")
+	field(LSV, "MINOR")
+	field(LLSV, "MAJOR")
+}
+record(longout, "$(IOC_NAME):loProcOut")
+{
+        field(SCAN, "Passive")
+        field(PINI, "1")
+        field(DESC, "Process Output Node")
+        field(PRIO, "HIGH")
+        field(DTYP, "SETFB COMMON")
+        field(OUT, "@PROC_ONODE")
+        field(HOPR, "7")
+        field(LOPR, "0")
+        field(HIHI, "8")
+        field(HIGH, "8")
+        field(LOW, "-1")
+        field(LOLO, "-1")
+        field(HHSV, "MAJOR")
+        field(HSV, "MINOR")
+        field(LSV, "MINOR")
+        field(LLSV, "MAJOR")
+}
+record(longout, "$(IOC_NAME):loProcIn")
+{
+        field(SCAN, "Passive")
+        field(PINI, "1")
+        field(DESC, "Process Output Node")
+        field(PRIO, "HIGH")
+        field(DTYP, "SETFB COMMON")
+        field(OUT, "@PROC_INODE")
+        field(HOPR, "7")
+        field(LOPR, "0")
+        field(HIHI, "8")
+        field(HIGH, "8")
+        field(LOW, "-1")
+        field(LOLO, "-1")
+        field(HHSV, "MAJOR")
+        field(HSV, "MINOR")
+        field(LSV, "MINOR")
+        field(LLSV, "MAJOR")
+}
+record(longout, "$(IOC_NAME):setInputSignal")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Set Output Node")
+	field(DTYP, "SETFB COMMON")
+	field(OUT, "@ISIG")
+	field(FLNK, "$(IOC_NAME):inputSignal")
+}
+record(longout, "$(IOC_NAME):setOutputSignal")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Set Output Signal")
+	field(DTYP, "SETFB COMMON")
+	field(OUT, "@OSIG")
+	field(FLNK, "$(IOC_NAME):outputSignal")
+}
+record(longout, "$(IOC_NAME):setClkRate")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Set Rate")
+	field(DTYP, "SETFB COMMON")
+	field(OUT, "@RATE")
+	field(FLNK, "$(IOC_NAME):clkRate")
+}
+record(longout, "$(IOC_NAME):setSoftTaskRate")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Set Rate")
+	field(DTYP, "SETFB COMMON")
+	field(OUT, "@SOFTTRIGGERRATE")
+	field(FLNK, "$(IOC_NAME):softTaskRate")
+}
+record(longout, "$(IOC_NAME):setTaskPriority")
+{
+	field(SCAN, "Passive")
+	field(DESC, "Set Priority")
+	field(DTYP, "SETFB COMMON")
+	field(OUT, "@PRIORITY")
+	field(FLNK, "$(IOC_NAME):taskPriority")
+}
+record(mbbo, "$(IOC_NAME):setInputNode")
+{
+        field(DESC,"Set Feedback Plugin")
+        field(DTYP,"SETFB COMMON MBBO")
+        field(OUT, "@INODE")
+        field(PINI, "YES")
+        field(FLNK, "$(IOC_NAME):mbbiFbInode")
+}
+record(mbbo, "$(IOC_NAME):setOutputNode")
+{
+        field(DESC,"Set Feedback Plugin")
+        field(DTYP,"SETFB COMMON MBBO")
+        field(OUT, "@ONODE")
+        field(PINI, "YES")
+        field(FLNK, "$(IOC_NAME):mbbiFbOnode")
+}

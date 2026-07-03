@@ -1,0 +1,66 @@
+# Example records for the Feedback Analog Input device support.
+# The plugin publishes samples with fbAnalogSet(channel, value).
+# These records process via I/O Intr and use the high-priority scan queue.
+
+record(ai, "$(IOC_NAME):AI0") {
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,0")
+    field(PREC, "6")
+}
+
+record(ai, "$(IOC_NAME):AI1") {
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,1")
+    field(PREC, "6")
+}
+
+record(ai, "$(IOC_NAME):AI2") {
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,2")
+    field(PREC, "6")
+}
+
+record(ai, "$(IOC_NAME):AI3") {
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,3")
+    field(PREC, "6")
+}
+record(ai, "$(IOC_NAME):AI4") {
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,4")
+    field(PREC, "6")
+}
+
+record(ai, "$(IOC_NAME):AI5") {
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,5")
+    field(PREC, "6")
+}
+
+record(ai, "$(IOC_NAME):AI6") {
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,6")
+    field(PREC, "6")
+}
+
+record(ai, "$(IOC_NAME):AI7") {
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,7")
+    field(PREC, "6")
+}

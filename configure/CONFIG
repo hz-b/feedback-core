@@ -1,0 +1,59 @@
+# CONFIG
+
+include $(TOP)/configure/RELEASE
+-include $(TOP)/configure/RELEASE.$(EPICS_HOST_ARCH)
+-include $(TOP)/configure/RELEASE.$(EPICS_HOST_ARCH).Common
+ifdef T_A
+-include $(TOP)/configure/RELEASE.Common.$(T_A)
+-include $(TOP)/configure/RELEASE.$(EPICS_HOST_ARCH).$(T_A)
+endif
+
+CONFIG=$(EPICS_BASE)/configure
+include $(CONFIG)/CONFIG
+
+# Override for definition in base
+INSTALL_LOCATION = $(TOP)
+include $(TOP)/configure/CONFIG_SITE
+-include $(TOP)/configure/CONFIG_SITE.$(EPICS_HOST_ARCH)
+-include $(TOP)/configure/CONFIG_SITE.$(EPICS_HOST_ARCH).Common
+
+ifdef T_A
+ -include $(TOP)/configure/CONFIG_SITE.Common.$(T_A)
+ -include $(TOP)/configure/CONFIG_SITE.$(EPICS_HOST_ARCH).$(T_A)
+
+ -include $(TOP)/configure/O.$(T_A)/CONFIG_APP_INCLUDE
+endif
+
+# Build/version metadata
+#
+# Keep the historical macro name HGVERSION for C source compatibility.
+# Prefer Git metadata for GitHub releases, but still support old Mercurial
+# work trees and source archives without any VCS metadata.
+
+GIT_VERSION := $(shell git -C $(TOP) describe --tags --dirty --always 2>/dev/null)
+GIT_DATE    := $(shell git -C $(TOP) log -1 --format=%cd --date=iso-strict 2>/dev/null)
+
+HG_VERSION  := $(shell hg --cwd $(TOP) id -nib 2>/dev/null)
+HG_DATE     := $(shell hg --cwd $(TOP) parents --template '{date|date}' 2>/dev/null)
+
+ifneq ($(strip $(GIT_VERSION)),)
+BUILD_VERSION := $(GIT_VERSION)
+else ifneq ($(strip $(HG_VERSION)),)
+BUILD_VERSION := $(HG_VERSION)
+else
+BUILD_VERSION := unknown
+endif
+
+ifneq ($(strip $(GIT_DATE)),)
+BUILD_TIMESTAMP := $(GIT_DATE)
+else ifneq ($(strip $(HG_DATE)),)
+BUILD_TIMESTAMP := $(HG_DATE)
+else
+BUILD_TIMESTAMP := unknown
+endif
+
+CFLAGS   += -DHGVERSION="\"$(BUILD_VERSION)\""
+CFLAGS   += -DFB_TIMESTAMP="\"$(BUILD_TIMESTAMP)\""
+CXXFLAGS += -DHGVERSION="\"$(BUILD_VERSION)\""
+CXXFLAGS += -DFB_TIMESTAMP="\"$(BUILD_TIMESTAMP)\""
+

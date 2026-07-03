@@ -1,0 +1,13 @@
+O.*
+*.o
+*.a
+*.so
+*.d
+*.dbd
+*.depends
+*.tmp
+*.bak
+*.orig
+core
+.DS_Store
+.hg*

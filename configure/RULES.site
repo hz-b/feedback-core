@@ -1,0 +1,3 @@
+doversion:
+	sed s/__DATE__/`date +%Y%m%d%H%M`/ < $(TOP)/feedosiApp/Db/feedosi_version.db.in > $(TOP)/feedosiApp/Db/feedosi_version.db
+

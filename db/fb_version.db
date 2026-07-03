@@ -1,0 +1,4 @@
+record (stringin, "$(IOC_NAME):fbVersion")
+{
+	field(VAL, "2026-07-02")
+}
