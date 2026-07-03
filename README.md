@@ -14,10 +14,10 @@ Common device-support records, and an analog feedback example for I/O Intr suppo
 
 See the documentation in `docs/`:
 
-- `docs/api.md` - short C/C++, IOC shell, and database interface reference
-- `docs/plugin.md` - implementing a feedback plugin with the `tfbdrvset` jump table
-- `docs/support.md` - common feedback device-support modules and record address syntax
-- `docs/analog_feedback.md` - analog feedback plugin startup and callback integration
+- [docs/api.md](https://github.com/hz-b/feedback-core/blob/main/docs/api.md) - short C/C++, IOC shell, and database interface reference
+- [docs/plugin.md](https://github.com/hz-b/feedback-core/blob/main/docs/plugin.md) - implementing a feedback plugin with the `tfbdrvset` jump table
+- [docs/support.md](https://github.com/hz-b/feedback-core/blob/main/docs/support.md) - common feedback device-support modules and record address syntax
+- [docs/analog_feedback.md](https://github.com/hz-b/feedback-core/blob/main/docs/analog_feedback.md) - analog feedback plugin startup and callback integration
 - `CHANGELOG.md` - notable changes for releases and publishing
 
 ## Getting Started
