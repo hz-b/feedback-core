@@ -8,6 +8,7 @@ O.*
 *.tmp
 *.bak
 *.orig
+db/*
 core
 .DS_Store
 .hg*
