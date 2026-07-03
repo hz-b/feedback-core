@@ -89,6 +89,13 @@ Before submitting a change:
 
 Any feedback is welcome for larger changes.
 
+## References
+
+- ** STATUS OF THE CONTINUOUS MODE SCAN FOR UNDULATOR BEAMLINES AT BESSY II **
+  A. Balzer, E. Schierle, E. Suljoti, M. Witt, HZB, Berlin, Germany R. Follath, PSI, Villigen, Switzerland
+  *Proceedings of ICALEPCS 2015*  
+  https://www.helmholtz-berlin.de/media/media/forschung/wi/optik-strahlrohre/mono/icalepcs2015-thha3o02.pdf
+
 ## License
 
 MIT License. See `LICENSE`.
