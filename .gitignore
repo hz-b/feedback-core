@@ -12,3 +12,9 @@ db/*
 core
 .DS_Store
 .hg*
+include/**
+testIoc/.iocsh_history
+testIoc/bin/*
+testIoc/db/*
+testIoc/iocBoot/iocfeedbackTest/.iocsh_history
+testIoc/iocBoot/iocfeedbackTest/envPaths
