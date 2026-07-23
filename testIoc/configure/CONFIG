@@ -1,0 +1,4 @@
+# Configuration for the embedded test IOC top.
+include $(TOP)/configure/RELEASE
+include $(TOP)/configure/CONFIG_SITE
+include $(EPICS_BASE)/configure/CONFIG

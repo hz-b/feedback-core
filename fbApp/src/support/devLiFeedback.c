@@ -129,6 +129,10 @@ static long read_longin(struct longinRecord *plongin)
         if (fbGetSoftTriggerRate(&dval) == OK) {
             plongin->val = (long)dval;
         }
+    } else if (pfbcdefpvt->device == FBTRIGGERMODE) {
+        if (fbGetTriggerMode(&ival) == OK) {
+            plongin->val = (long)ival;
+        }
     } else if (pfbcdefpvt->device == FBPRIORITY) {
         if (fbGetPriority(&ival) == OK) {
             plongin->val = (long)ival;

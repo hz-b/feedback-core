@@ -71,6 +71,12 @@ epicsExportAddress(dset, devFbGetMbbi);
 
 static void get_strval(char *dest, int index, int device)
 {
+    const char *modeName;
+
+    if (dest == NULL)
+        return;
+    dest[0] = '\0';
+
     switch (device) {
     case FBPLUGIN:
         feedbackGetPluginNameById(index, dest, MAX_EPICS_MBB_STRING_SIZE - 1);
@@ -84,9 +90,17 @@ static void get_strval(char *dest, int index, int device)
         if (index < 8)
             fbGetNodeName(index + 8, dest, MAX_EPICS_MBB_STRING_SIZE - 1);
         break;
-    }                                   /* switch */
+    case FBTRIGGERMODE:
+        if (index <= FB_TRIGGER_MODE_MANUAL) {
+            modeName = fbGetTriggerModeName(index);
+            strncpy(dest, modeName, MAX_EPICS_MBB_STRING_SIZE - 1);
+            dest[MAX_EPICS_MBB_STRING_SIZE - 1] = '\0';
+        }
+        break;
+    default:
+        break;
+    }
     Debug(10, "%s", dest);
-    return;
 }
 
 static int updatestrings(struct dbCommon *precord, int device, int type)
@@ -177,24 +191,36 @@ static long mbbi_init_record(struct mbbiRecord *pmbbi)
 static long mbbi_read(struct mbbiRecord *pmbbi)
 {
     structFbCDefPVT *pdpvt;
-    int ival = 0;
-    short inode, onode;
+    int ival;
+    short inode;
+    short onode;
 
-    pdpvt = (structFbCDefPVT *) pmbbi->dpvt;
-    updatestrings((dbCommon *) pmbbi, pdpvt->device, MBBITYPE);
-    if (pdpvt->device == FBPLUGIN)
-        feedbackGetPluginId(&ival);
-    else
-        return -1;
+    pdpvt = (structFbCDefPVT *)pmbbi->dpvt;
+    ival = 0;
+    inode = 0;
+    onode = 0;
+    updatestrings((dbCommon *)pmbbi, pdpvt->device, MBBITYPE);
 
-    if (fbGetNodes(&inode, &onode) != OK) {
-        Debug(1, "%s: Error with active nodes.", pmbbi->name);
+    if (pdpvt->device == FBPLUGIN) {
+        if (feedbackGetPluginId(&ival) != OK)
+            return ERROR;
+    } else if (pdpvt->device == FBTRIGGERMODE) {
+        if (fbGetTriggerMode(&ival) != OK)
+            return ERROR;
+    } else if (pdpvt->device == FBINODE ||
+               pdpvt->device == FBONODE) {
+        if (fbGetNodes(&inode, &onode) != OK) {
+            Debug(1, "%s: Error with active nodes.", pmbbi->name);
+            return ERROR;
+        }
+        if (pdpvt->device == FBINODE)
+            ival = (int)inode;
+        else
+            ival = (int)onode;
+    } else {
+        return ERROR;
     }
-    if (pdpvt->device == FBINODE) {
-        ival = (int)inode;
-    } else if (pdpvt->device == FBONODE) {
-        ival = (int)onode;
-    }
+
     pmbbi->val = ival;
     return 2;
 }
@@ -203,54 +229,73 @@ static long mbbo_write(struct mbboRecord *pmbbo)
 {
     structFbCDefPVT *pdpvt;
     int id;
-    short inode, onode;
+    int mode;
+    short inode;
+    short onode;
 
-    pdpvt = (structFbCDefPVT *) pmbbo->dpvt;
-    updatestrings((dbCommon *) pmbbo, pdpvt->device, MBBOTYPE);
+    pdpvt = (structFbCDefPVT *)pmbbo->dpvt;
+    updatestrings((dbCommon *)pmbbo, pdpvt->device, MBBOTYPE);
 
     if (pdpvt->device == FBPLUGIN) {
         if (pdpvt->firsttime == 0) {
             pdpvt->firsttime = 1;
-            feedbackGetPluginId(&id);
-            pmbbo->val = (int)id;
+            if (feedbackGetPluginId(&id) == OK)
+                pmbbo->val = (int)id;
             return 0;
         }
-        if (fbDeactivate() != OK) {
+        if (fbDeactivate() != OK ||
+            fbActivate((int)pmbbo->val) != OK) {
             recGblSetSevr(pmbbo, WRITE_ALARM, INVALID_ALARM);
-            Debug(0, "%s: Cannot deactivate plugin.", pmbbo->name);
-            return -1;
+            Debug(0, "%s: Cannot change active plugin.", pmbbo->name);
+            return ERROR;
         }
-        if (fbActivate((int)pmbbo->val) != OK) {
-            recGblSetSevr(pmbbo, WRITE_ALARM, INVALID_ALARM);
-            Debug(0, "%s: Cannot activate plugin.", pmbbo->name);
-            return -1;
-        } else
-            return 0;
+        return 0;
     }
+
+    if (pdpvt->device == FBTRIGGERMODE) {
+        if (pdpvt->firsttime == 0) {
+            pdpvt->firsttime = 1;
+            if (fbGetTriggerMode(&mode) == OK)
+                pmbbo->val = (unsigned short)mode;
+            return 0;
+        }
+        if (fbSetTriggerMode((int)pmbbo->val) != OK) {
+            recGblSetSevr(pmbbo, WRITE_ALARM, INVALID_ALARM);
+            Debug(0, "%s: Cannot change trigger mode while running or without a soft rate.", pmbbo->name);
+            return ERROR;
+        }
+        return 0;
+    }
+
+    if (pdpvt->device != FBINODE && pdpvt->device != FBONODE)
+        return ERROR;
+
     if (fbGetNodes(&inode, &onode) != OK) {
         Debug(1, "%s: Error with active nodes.", pmbbo->name);
+        return ERROR;
     }
+
     if (pdpvt->device == FBINODE) {
         if (pdpvt->firsttime == 0) {
             pdpvt->firsttime = 1;
-            pmbbo->val = (int)inode;
+            pmbbo->val = (unsigned short)inode;
             return 0;
         }
         if (fbSetNodes((short)pmbbo->val, onode) != OK) {
             recGblSetSevr(pmbbo, WRITE_ALARM, INVALID_ALARM);
             Debug(0, "%s: Cannot activate input node.", pmbbo->name);
-            return -1;
+            return ERROR;
         }
-    } else if (pdpvt->device == FBONODE) {
+    } else {
         if (pdpvt->firsttime == 0) {
             pdpvt->firsttime = 1;
-            pmbbo->val = (int)onode;
+            pmbbo->val = (unsigned short)onode;
             return 0;
         }
         if (fbSetNodes(inode, (short)pmbbo->val) != OK) {
             recGblSetSevr(pmbbo, WRITE_ALARM, INVALID_ALARM);
             Debug(0, "%s: Cannot activate output node.", pmbbo->name);
-            return -1;
+            return ERROR;
         }
     }
     return 0;

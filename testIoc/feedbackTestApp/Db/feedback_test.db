@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Helmholtz-Zentrum Berlin fuer Materialien und Energie GmbH
+# SPDX-License-Identifier: MIT
+
+record(ai, "$(P)AI0") {
+    field(DESC, "Feedback analog channel 0")
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,0")
+    field(PREC, "6")
+}
+
+record(ai, "$(P)AI1") {
+    field(DESC, "Feedback analog channel 1")
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,1")
+    field(PREC, "6")
+}
+
+record(ai, "$(P)AI2") {
+    field(DESC, "Feedback analog channel 2")
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,2")
+    field(PREC, "6")
+}
+
+record(ai, "$(P)AI3") {
+    field(DESC, "Feedback analog channel 3")
+    field(DTYP, "Feedback Analog Input")
+    field(SCAN, "I/O Intr")
+    field(PRIO, "HIGH")
+    field(INP,  "@AIN,3")
+    field(PREC, "6")
+}

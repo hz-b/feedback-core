@@ -1,0 +1,3 @@
+# IOC boot-directory rules.
+# Compatible with EPICS Base 3.14.12.8 and EPICS 7.
+include $(EPICS_BASE)/configure/RULES.ioc

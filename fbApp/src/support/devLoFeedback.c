@@ -81,7 +81,6 @@ static long write_longout(struct longoutRecord *plongout)
     int newdataselect;
 
     pfbcdefpvt = (structFbCDefPVT *) plongout->dpvt;
-    pfb = pfbcdefpvt->fb;
 
     if (pfbcdefpvt->device == FBDATASETEVENTS) {
         // to heaviside this signal
@@ -99,14 +98,22 @@ static long write_longout(struct longoutRecord *plongout)
         return OK;
     }
 
-    InputNodeFunction = (INTSUPFUN *) & (pfbDrvDset->input_node1);
-    OutputNodeFunction = (INTSUPFUN *) & (pfbDrvDset->output_node1);
-
-    if (pfbDrvDset == NULL)
-        return ERROR;
-    if (pfbDrvDset->parameter == NULL) {
-        return ERROR;
+    if (pfbcdefpvt->device == FBTRIGGERMODE) {
+        if (fbSetTriggerMode((int)plongout->val) != OK) {
+            recGblSetSevr(plongout, WRITE_ALARM, INVALID_ALARM);
+            return ERROR;
+        }
+        return OK;
     }
+
+    if (pfbDrvDset == NULL || pfbDrvDset->parameter == NULL)
+        return ERROR;
+
+    pfb = pfbcdefpvt->fb;
+    if (pfb == NULL)
+        pfb = pfbDrvDset->parameter;
+    InputNodeFunction = (INTSUPFUN *)&pfbDrvDset->input_node1;
+    OutputNodeFunction = (INTSUPFUN *)&pfbDrvDset->output_node1;
 
     if (pfbcdefpvt->device == FBVAL)
         pfb->lval = plongout->val;
@@ -173,7 +180,7 @@ static long write_longout(struct longoutRecord *plongout)
     else if (pfbcdefpvt->device == FBHOME) {
         Debug(2, ":Home Flags = %x", (unsigned int)plongout->val);
         if (fbHome((unsigned int)plongout->val) != OK) {
-            Debug(0, "ERROR in fbSetRate() %d\n", plongout->val);
+            Debug(0, "ERROR in feedback setting %d\n", plongout->val);
             // FIXME: WRITE_ALARM
             recGblSetSevr(plongout, READ_ALARM, INVALID_ALARM);
         }                               /* if (bConfigure!=OK) */
@@ -182,21 +189,21 @@ static long write_longout(struct longoutRecord *plongout)
     else if (pfbcdefpvt->device == FBRATE) {
         Debug(2, ":Rate = %d", plongout->val);
         if (fbSetRate((int)plongout->val) != OK) {
-            Debug(0, "ERROR in fbSetRate() %d\n", plongout->val);
+            Debug(0, "ERROR in feedback setting %d\n", plongout->val);
             recGblSetSevr(plongout, READ_ALARM, INVALID_ALARM);
         }
     }                                   /* FBRATE */
     else if (pfbcdefpvt->device == FBSOFTTRIGGERRATE) {
         Debug(1, ":Rate = %d", plongout->val);
         if (fbSetSoftTriggerRate((double)plongout->val) != OK) {
-            Debug(0, "ERROR in fbSetRate() %d\n", plongout->val);
+            Debug(0, "ERROR in feedback setting %d\n", plongout->val);
             recGblSetSevr(plongout, READ_ALARM, INVALID_ALARM);
         }
     }                                   /* FBSOFTTRIGGERRATE */
     else if (pfbcdefpvt->device == FBPRIORITY) {
         Debug(2, ":Priority = %d", plongout->val);
         if (fbSetPriority((int)plongout->val) != OK) {
-            Debug(0, "ERROR in fbSetRate() %d\n", plongout->val);
+            Debug(0, "ERROR in feedback setting %d\n", plongout->val);
             recGblSetSevr(plongout, READ_ALARM, INVALID_ALARM);
         }
     }                                   /* FBRATE */

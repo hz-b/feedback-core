@@ -178,6 +178,68 @@ static void fbTriggerCallFunc(const iocshArgBuf * args)
     Debug(2, "fbTrigger: rc = %d", rc);
 }
 
+
+static const iocshArg fbSetRateArg0 = { "rate", iocshArgInt };
+static const iocshArg *fbSetRateArgs[] = { &fbSetRateArg0 };
+static const iocshFuncDef fbSetRateFuncDef = { "fbSetRate", 1, fbSetRateArgs };
+
+static void fbSetRateCallFunc(const iocshArgBuf *args)
+{
+    if (fbSetRate(args[0].ival) != OK)
+        printf("Unable to set hardware trigger rate to %d Hz\n", args[0].ival);
+}
+
+static const iocshArg fbSetSoftTriggerRateArg0 = { "rate", iocshArgDouble };
+static const iocshArg *fbSetSoftTriggerRateArgs[] = { &fbSetSoftTriggerRateArg0 };
+static const iocshFuncDef fbSetSoftTriggerRateFuncDef = {
+    "fbSetSoftTriggerRate", 1, fbSetSoftTriggerRateArgs
+};
+
+static void fbSetSoftTriggerRateCallFunc(const iocshArgBuf *args)
+{
+    double effectiveRate;
+
+    if (fbSetSoftTriggerRate(args[0].dval) != OK) {
+        printf("Unable to set software trigger rate to %f Hz\n", args[0].dval);
+        return;
+    }
+    if (fbGetSoftTriggerRate(&effectiveRate) == OK)
+        printf("Software trigger effective rate: %f Hz\n", effectiveRate);
+}
+
+static const iocshArg fbSetTriggerModeArg0 = { "mode", iocshArgInt };
+static const iocshArg *fbSetTriggerModeArgs[] = { &fbSetTriggerModeArg0 };
+static const iocshFuncDef fbSetTriggerModeFuncDef = {
+    "fbSetTriggerMode", 1, fbSetTriggerModeArgs
+};
+
+static void fbSetTriggerModeCallFunc(const iocshArgBuf *args)
+{
+    if (fbSetTriggerMode(args[0].ival) != OK) {
+        printf("Unable to set trigger mode %d; use 0=Hardware, 1=Software, 2=Manual\n",
+               args[0].ival);
+        return;
+    }
+    printf("Trigger mode: %d (%s)\n",
+           args[0].ival,
+           fbGetTriggerModeName(args[0].ival));
+}
+
+static const iocshFuncDef fbGetTriggerModeFuncDef = {
+    "fbGetTriggerMode", 0, NULL
+};
+
+static void fbGetTriggerModeCallFunc(const iocshArgBuf *args)
+{
+    int mode;
+
+    (void)args;
+    if (fbGetTriggerMode(&mode) == OK)
+        printf("Trigger mode: %d (%s)\n", mode, fbGetTriggerModeName(mode));
+    else
+        printf("Unable to read trigger mode\n");
+}
+
 /* 
  * extern int fbpr(void);
  */
@@ -263,6 +325,10 @@ static void fbRegisterCommands(void)
         iocshRegister(&fbOpenFuncDef, fbOpenCallFunc);
         iocshRegister(&fbCloseFuncDef, fbCloseCallFunc);
         iocshRegister(&fbTriggerFuncDef, fbTriggerCallFunc);
+        iocshRegister(&fbSetRateFuncDef, fbSetRateCallFunc);
+        iocshRegister(&fbSetSoftTriggerRateFuncDef, fbSetSoftTriggerRateCallFunc);
+        iocshRegister(&fbSetTriggerModeFuncDef, fbSetTriggerModeCallFunc);
+        iocshRegister(&fbGetTriggerModeFuncDef, fbGetTriggerModeCallFunc);
         iocshRegister(&fbprFuncDef, fbprCallFunc);
         iocshRegister(&fbActivateFuncDef, fbActivateCallFunc);
         iocshRegister(&fbDeactivateFuncDef, fbDeactivateCallFunc);

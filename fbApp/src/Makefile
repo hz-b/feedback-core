@@ -30,6 +30,7 @@ TESTS += devFeedbackTest
 endif
 
 fbCore_LIBS += $(EPICS_BASE_IOC_LIBS)
+fbCore_SYS_LIBS_Linux += rt
 
 OBJS_vxWorks += fbCore.c
 

@@ -16,8 +16,7 @@
 #define ERROR   -1
 #endif
 
-#define __PPC603_SYS_CLK_RATE_MIN__ defined vxWorks && defined CPU && CPU == PPC603
-#if __PPC603_SYS_CLK_RATE_MIN__
+#if defined(vxWorks) && defined(CPU) && (CPU == PPC603)
 #define SYS_CLK_RATE_MIN 40
 #endif
 
@@ -42,6 +41,13 @@
 #define FB_NO_OPTIONS		0
 #define FB_SIGNAL_CLOSE		1
 #define FB_SIGNAL_NOCLOSE	0
+
+/* Feedback cycle trigger source. */
+typedef enum fbTriggerMode {
+    FB_TRIGGER_MODE_HARDWARE = 0,
+    FB_TRIGGER_MODE_SOFTWARE = 1,
+    FB_TRIGGER_MODE_MANUAL = 2
+} fbTriggerMode;
 #ifdef __cplusplus
 typedef int (*INTSUPFUN)(void *);       /* ptr to device support function */
 #else
@@ -151,6 +157,7 @@ extern "C" {
     extern int fbIntSoftTriggerDelay;
     extern int fb_common_debug;
     extern int fbIntSigFlag;
+    extern long fbLngCtrCatcher;
     extern int fbSetNodes(short inode, short onode);
     extern int fbGetNodes(short *inode, short *onode);
     extern int fbGetNodeName(int index, char *name, int length);
@@ -160,6 +167,11 @@ extern "C" {
     extern int fbSetRate(int rate);
     extern int fbSetSoftTriggerRate(double rate);
     extern int fbGetSoftTriggerRate(double *rate);
+    extern int fbSetTriggerMode(int mode);
+    extern int fbGetTriggerMode(int *mode);
+    extern const char *fbGetTriggerModeName(int mode);
+    extern int fbGetSoftTriggerOverruns(unsigned long *overruns);
+    extern int fbGetHardwareTriggerOverruns(unsigned long *overruns);
     extern int fbGetPriority(int *priority);
     extern int fbSetPriority(int priority);
     extern int fbpr(void);

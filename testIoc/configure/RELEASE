@@ -1,0 +1,6 @@
+# Reuse the parent module's EPICS Base and support-module configuration.
+# Use only RELEASE syntax understood by EPICS Base 3.14.12.8 and EPICS 7.
+include $(TOP)/../configure/RELEASE
+
+# The embedded IOC consumes the parent feedback-core installation.
+FEEDBACK_CORE = $(TOP)/..

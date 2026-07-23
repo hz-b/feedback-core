@@ -31,6 +31,7 @@
 #define FB_PROCINODE_STRING "PROC_INODE"
 #define FB_PLUGIN_STRING   "PLUGIN"
 #define FB_SOFTTRIGGERRATE_STRING "SOFTTRIGGERRATE"
+#define FB_TRIGGERMODE_STRING "TRIGGERMODE"
 #define FB_DATASETEVENTS_STRING "DATASETEVENTS"
 
 /*
@@ -104,7 +105,8 @@ enum enumFbCDevice {
     FBPROC_INODE,
     FBPLUGIN,
     FBSOFTTRIGGERRATE,
-    FBDATASETEVENTS
+    FBDATASETEVENTS,
+    FBTRIGGERMODE
 };                                      /* enumFbCDevice */
 
 #ifdef __cplusplus

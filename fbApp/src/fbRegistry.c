@@ -4,7 +4,7 @@
 #include <string.h>
 #include <epicsStdioRedirect.h>
 #include "fbCore.h"
-#include "registry.h"
+#include "fbRegistry.h"
 
 #ifdef NODEBUG
 #define Debug(L,FMT,ARGS...) ;
@@ -47,7 +47,7 @@ int feedbackInit(tfbdrvset * plugin)
 
 int feedbackGetPluginById(int id, tfbdrvset ** feedbackPlugin)
 {
-    if (id < 0 || id > FB_MAX_MEMBERS)
+    if (id < 0 || id >= FB_MAX_MEMBERS)
         return ERROR;
     *feedbackPlugin = feedbackPluginList[id];
     return OK;
@@ -55,7 +55,7 @@ int feedbackGetPluginById(int id, tfbdrvset ** feedbackPlugin)
 
 int feedbackGetPluginNameById(int id, char *name, size_t n)
 {
-    if (id < 0 || id > FB_MAX_MEMBERS)
+    if (id < 0 || id >= FB_MAX_MEMBERS)
         return ERROR;
     if (feedbackPluginList[id] != NULL) {
         if (feedbackPluginList[id]->name != NULL) {

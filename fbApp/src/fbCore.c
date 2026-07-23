@@ -2,10 +2,30 @@
 // SPDX-License-Identifier: MIT
 
 /*! \file
- * \brief Feedback Support API 
+ * \brief Feedback Support API
  * */
-#define __USE_FAST_VXWORKS_SYS_AUX_CLOCK__ defined vxWorks
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
+#if defined(__linux__) || defined(linux)
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
+#endif
+
+#if defined(vxWorks)
+#define FB_OS_VXWORKS 1
+#else
+#define FB_OS_VXWORKS 0
+#endif
+
+#if !FB_OS_VXWORKS && (defined(__linux__) || defined(linux))
+#define FB_OS_LINUX 1
+#else
+#define FB_OS_LINUX 0
+#endif
+
+#if FB_OS_VXWORKS
 #include <taskLib.h>
 #include <logLib.h>
 #include <sysLib.h>
@@ -14,8 +34,15 @@
 #include <sigLib.h>
 #include <timers.h>
 #else
-#include <epicsMutex.h>
 #include <epicsEvent.h>
+#endif
+#if FB_OS_LINUX
+#include <time.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #endif
 #include <epicsMutex.h>
 #include <epicsThread.h>
@@ -25,12 +52,12 @@
 #include <errno.h>
 #include <signal.h>
 #include <semaphore.h>
-#include <fcntl.h>                      /* For O_* constants */
-#include <sys/stat.h>                   /* For mode constants */
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <epicsExport.h>
 #include "fbCore.h"
 
-/*! Value returned if `sem_open' failed.  */
+/*! Value returned if `sem_open' failed. */
 #ifndef SEM_FAILED
 #define SEM_FAILED      ((sem_t *) 0)
 #endif
@@ -39,20 +66,35 @@
 #define Debug(L,FMT,ARGS...) ;
 #else
 #define Debug(L, FMT, ARGS...) { if(L <= fb_common_debug) \
-	fprintf(stderr, FMT "\t- file : " __FILE__ ", line %d\n", ## ARGS, __LINE__); }
+    fprintf(stderr, FMT "\t- file : " __FILE__ ", line %d\n", ## ARGS, __LINE__); }
 #endif
 
 void fbLoop(void);
-int fbInnerLoop(tfbdrvset * fbdrvset, tfbdrvpar * fbdrvpar);
+int fbInnerLoop(tfbdrvset *fbdrvset, tfbdrvpar *fbdrvpar);
 void fbTriggerLoop(void);
 void fbauxclkhandler(int arg);
 void fbsignalhandler(int signal);
-int fb_common_debug = 3;
+
+static int fbWaitForNextCycle(tfbdrvpar *fbdrvpar);
+static int fbPrepareTriggerSource(tfbdrvpar *fbdrvpar);
+static void fbStopTriggerSource(void);
+#if FB_OS_LINUX
+static int fbLinuxTimerStart(int rate);
+static int fbLinuxTimerSetRate(int rate);
+static int fbLinuxTimerWait(void);
+static int fbLinuxTimerRequestStop(void);
+static void fbLinuxTimerClose(void);
+#endif
+static void fbSignalFeedbackCycle(void);
+static void fbTriggerConfigLockInit(void);
+static void fbGetTriggerConfiguration(int *mode, double *softRate);
+
+int fb_common_debug = 0;
 static int fb_initialized = 0;
 epicsExportAddress(int, fb_common_debug);
 int fb_common_vxfbtask = 1;
 epicsExportAddress(int, fb_common_vxfbtask);
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
+#if FB_OS_VXWORKS
 int fbIntTaskId = 0;
 SEM_ID fbSemBTimer;
 #else
@@ -66,10 +108,574 @@ epicsExportAddress(int, fbLngCtrCatcher);
 int fbIntSoftTriggerDelay = -1;
 epicsExportAddress(int, fbIntSoftTriggerDelay);
 
+static epicsMutexId fbTriggerConfigLock = NULL;
+static volatile int fbCurrentTriggerMode = FB_TRIGGER_MODE_HARDWARE;
+static volatile int fbLoopRequested = 0;
+static volatile int fbLoopRunning = 0;
+static double fbSoftTriggerRequestedRate = 0.0;
+static double fbSoftTriggerEffectiveRate = 0.0;
+static unsigned long fbSoftTriggerOverruns = 0ul;
+static unsigned long fbHardwareTriggerOverruns = 0ul;
+
+#if FB_OS_LINUX
+typedef struct fbLinuxTimerState {
+    int timerFd;
+    int stopFd;
+    int rate;
+} fbLinuxTimerState;
+
+typedef struct fbLinuxSoftClockState {
+    struct timespec next;
+    double rate;
+    int initialized;
+} fbLinuxSoftClockState;
+
+static fbLinuxTimerState fbLinuxTimer = { -1, -1, 0 };
+static fbLinuxSoftClockState fbLinuxSoftClock;
+#endif
+
 /* defined in support module: */
 tfbdrvset *feedbackPluginList[FB_MAX_MEMBERS] = { 0 };
-
 tfbdrvset *pfbDrvDset = NULL;
+
+static void fbTriggerConfigLockInit(void)
+{
+    if (fbTriggerConfigLock == NULL)
+        fbTriggerConfigLock = epicsMutexMustCreate();
+}
+
+static void fbGetTriggerConfiguration(int *mode, double *softRate)
+{
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    if (mode != NULL)
+        *mode = fbCurrentTriggerMode;
+    if (softRate != NULL)
+        *softRate = fbSoftTriggerEffectiveRate;
+    epicsMutexUnlock(fbTriggerConfigLock);
+}
+
+const char *fbGetTriggerModeName(int mode)
+{
+    switch (mode) {
+    case FB_TRIGGER_MODE_HARDWARE:
+        return "Hardware";
+    case FB_TRIGGER_MODE_SOFTWARE:
+        return "Software";
+    case FB_TRIGGER_MODE_MANUAL:
+        return "Manual";
+    default:
+        return "Unknown";
+    }
+}
+
+#if FB_OS_LINUX
+/*!
+ * First compares the seconds, if needed compare the nanoseconds.
+ */
+static int fbTimespecCompare(const struct timespec *left, const struct timespec *right)
+{
+    if (left->tv_sec < right->tv_sec)
+        return -1;
+    if (left->tv_sec > right->tv_sec)
+        return 1;
+    if (left->tv_nsec < right->tv_nsec)
+        return -1;
+    if (left->tv_nsec > right->tv_nsec)
+        return 1;
+    return 0;
+}
+
+static void fbTimespecAddPeriod(struct timespec *value, double rate)
+{
+    double period;
+    long seconds;
+    long nanoseconds;
+
+    period = 1.0 / rate;
+    seconds = (long) period;
+    nanoseconds = (long) ((period - (double) seconds) * 1000000000.0 + 0.5);
+
+    value->tv_sec += seconds;
+    value->tv_nsec += nanoseconds;
+    /* On slow rates normalize from huge ns to sec */
+    while (value->tv_nsec >= 1000000000L) {
+        value->tv_nsec -= 1000000000L;
+        value->tv_sec++;
+    }
+}
+
+/*!
+ * Convert rate to period
+ */
+static int fbLinuxRateToTimespec(double rate, struct timespec *period)
+{
+    double secondsValue;
+    long nanoseconds;
+
+    if (period == NULL || rate <= 0.0)
+        return ERROR;
+
+    secondsValue = 1.0 / rate;
+    period->tv_sec = (time_t) secondsValue;
+    nanoseconds = (long)((secondsValue - (double) period->tv_sec) * 1000000000.0 + 0.5);
+
+    if (nanoseconds >= 1000000000L) {
+        period->tv_sec++;
+        nanoseconds -= 1000000000L;
+    }
+    if (period->tv_sec == 0 && nanoseconds < 1L)
+        nanoseconds = 1L;
+
+    period->tv_nsec = nanoseconds;
+    return OK;
+}
+
+/*
+ * Configure timer
+ */
+static int fbLinuxTimerArmLocked(int rate)
+{
+    struct itimerspec timerSpec;
+    struct timespec now;
+    struct timespec period;
+
+    if (fbLinuxTimer.timerFd < 0) {
+        Debug(0, "Linux hardware timer cannot be armed: invalid timerfd=%d", fbLinuxTimer.timerFd);
+        return ERROR;
+    }
+    if (rate < FB_MIN_RATE || rate > FB_MAX_RATE) {
+        Debug(0, "Linux hardware timer rate out of range: rate=%d valid=%d..%d Hz", rate, FB_MIN_RATE, FB_MAX_RATE);
+        return ERROR;
+    }
+
+    if (fbLinuxRateToTimespec((double)rate, &period) != OK) {
+        Debug(0, "Linux hardware timer cannot convert rate=%d Hz to period", rate);
+        return ERROR;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        Debug(0, "Linux hardware timer clock_gettime(CLOCK_MONOTONIC) failed: errno=%d (%s)", errno, strerror(errno));
+        return ERROR;
+    }
+
+    memset(&timerSpec, 0, sizeof(timerSpec));
+    timerSpec.it_interval = period;
+    timerSpec.it_value = now;
+    timerSpec.it_value.tv_sec += period.tv_sec;
+    timerSpec.it_value.tv_nsec += period.tv_nsec;
+    while (timerSpec.it_value.tv_nsec >= 1000000000L) {
+        timerSpec.it_value.tv_nsec -= 1000000000L;
+        timerSpec.it_value.tv_sec++;
+    }
+
+    if (timerfd_settime(fbLinuxTimer.timerFd,
+                        TFD_TIMER_ABSTIME,
+                        &timerSpec,
+                        NULL) != 0) {
+        Debug(0, "Linux hardware timer timerfd_settime failed: timerfd=%d rate=%d errno=%d (%s)", fbLinuxTimer.timerFd, rate, errno, strerror(errno));
+        return ERROR;
+    }
+
+    fbLinuxTimer.rate = rate;
+    Debug(2, "Linux hardware timer armed: timerfd=%d rate=%d Hz period=%ld.%09ld s first=%ld.%09ld",
+          fbLinuxTimer.timerFd, rate, (long)period.tv_sec, period.tv_nsec, (long)timerSpec.it_value.tv_sec, timerSpec.it_value.tv_nsec);
+    return OK;
+}
+
+/*!
+ * Close and release resources
+ */
+static void fbLinuxTimerCloseLocked(void)
+{
+    int closeStatus;
+
+    if (fbLinuxTimer.timerFd >= 0 || fbLinuxTimer.stopFd >= 0) {
+        Debug(2, "Closing Linux hardware timer backend: timerfd=%d stopfd=%d rate=%d Hz",
+              fbLinuxTimer.timerFd, fbLinuxTimer.stopFd, fbLinuxTimer.rate);
+    }
+
+    if (fbLinuxTimer.timerFd >= 0) {
+        closeStatus = close(fbLinuxTimer.timerFd);
+        if (closeStatus != 0) {
+            Debug(0, "Closing Linux hardware timerfd=%d failed: errno=%d (%s)",
+                  fbLinuxTimer.timerFd, errno, strerror(errno));
+        }
+        fbLinuxTimer.timerFd = -1;
+    }
+    if (fbLinuxTimer.stopFd >= 0) {
+        closeStatus = close(fbLinuxTimer.stopFd);
+        if (closeStatus != 0) {
+            Debug(0, "Closing Linux hardware stop eventfd=%d failed: errno=%d (%s)",
+                  fbLinuxTimer.stopFd, errno, strerror(errno));
+        }
+        fbLinuxTimer.stopFd = -1;
+    }
+    fbLinuxTimer.rate = 0;
+}
+
+/*!
+ * Create, initialize, and arm Linux timerfd hardware trigger
+ */
+static int fbLinuxTimerStart(int rate)
+{
+    int timerFd;
+    int stopFd;
+    int status;
+
+    Debug(2, "Starting Linux hardware timer backend at %d Hz", rate);
+
+    timerFd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+    if (timerFd < 0) {
+        Debug(0,
+              "Linux hardware timer timerfd_create failed: errno=%d (%s)",
+              errno, strerror(errno));
+        return ERROR;
+    }
+
+    stopFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (stopFd < 0) {
+        Debug(0, "Linux hardware timer eventfd creation failed: errno=%d (%s)", errno, strerror(errno));
+        close(timerFd);
+        return ERROR;
+    }
+    Debug(3, "Linux hardware timer descriptors created: timerfd=%d stopfd=%d", timerFd, stopFd);
+
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    fbLinuxTimerCloseLocked();
+    fbLinuxTimer.timerFd = timerFd;
+    fbLinuxTimer.stopFd = stopFd;
+    fbHardwareTriggerOverruns = 0ul;
+    status = fbLinuxTimerArmLocked(rate);
+    if (status != OK)
+        fbLinuxTimerCloseLocked();
+    epicsMutexUnlock(fbTriggerConfigLock);
+
+    if (status == OK) {
+        Debug(1, "Linux hardware timer backend active at %d Hz", rate);
+    } else {
+        Debug(0, "Linux hardware timer backend failed to start at %d Hz", rate);
+    }
+
+    return status;
+}
+
+static int fbLinuxTimerSetRate(int rate)
+{
+    int status;
+#ifndef NODEBUG
+    int oldRate;
+#endif
+
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+#ifndef NODEBUG
+    oldRate = fbLinuxTimer.rate;
+#endif
+    status = fbLinuxTimerArmLocked(rate);
+    if (status == OK)
+        fbHardwareTriggerOverruns = 0ul;
+    epicsMutexUnlock(fbTriggerConfigLock);
+
+    if (status == OK) {
+        Debug(1,
+              "Linux hardware timer rate changed: old=%d Hz new=%d Hz; overrun counter reset",
+              oldRate, rate);
+    } else {
+        Debug(0,
+              "Linux hardware timer rate change failed: old=%d Hz requested=%d Hz",
+              oldRate, rate);
+    }
+    return status;
+}
+
+static int fbLinuxTimerWait(void)
+{
+    struct pollfd fds[2];
+    uint64_t expirations;
+    uint64_t stopValue;
+    ssize_t count;
+    int timerFd;
+    int stopFd;
+    int status;
+#ifndef NODEBUG
+    unsigned long totalOverruns;
+#endif
+
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    timerFd = fbLinuxTimer.timerFd;
+    stopFd = fbLinuxTimer.stopFd;
+    epicsMutexUnlock(fbTriggerConfigLock);
+
+    if (timerFd < 0 || stopFd < 0) {
+        Debug(0,
+              "Linux hardware timer wait called with invalid descriptors: timerfd=%d stopfd=%d",
+              timerFd, stopFd);
+        return ERROR;
+    }
+
+    memset(fds, 0, sizeof(fds));
+    // eventfd  (stop requests)
+    fds[0].fd = timerFd;
+    fds[0].events = POLLIN;
+    // timerfd  (hardware timer ticks)
+    fds[1].fd = stopFd;
+    fds[1].events = POLLIN;
+
+    do {
+        status = poll(fds, 2, -1);
+    } while (status < 0 && errno == EINTR && fbIntSigFlag == 0);
+
+    if (fbIntSigFlag != 0) {
+        Debug(2, "%s", "Linux hardware timer wait interrupted by shutdown flag");
+        return ERROR;
+    }
+    if (status < 0) {
+        Debug(0, "Linux hardware timer poll failed: timerfd=%d stopfd=%d errno=%d (%s)", timerFd, stopFd, errno, strerror(errno));
+        return ERROR;
+    }
+    /* handle stop request */
+    if ((fds[1].revents & POLLIN) != 0) {
+        do {
+            count = read(stopFd, &stopValue, sizeof(stopValue));
+        } while (count < 0 && errno == EINTR);
+        if (count < 0) {
+            Debug(0, "Linux hardware timer stop event read failed: stopfd=%d count=%ld errno=%d (%s)", stopFd, (long)count, errno, strerror(errno));
+        } else if (count != (ssize_t)sizeof(stopValue)) {
+            Debug(0, "Linux hardware timer stop event short read: stopfd=%d count=%ld expected=%lu", stopFd, (long)count, (unsigned long)sizeof(stopValue));
+        } else {
+            Debug(2, "Linux hardware timer stop event received: stopfd=%d value=%lu", stopFd, (unsigned long)stopValue);
+        }
+        return ERROR;
+    }
+    // check 
+    if ((fds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        Debug(0, "Linux hardware timer stop eventfd poll error: stopfd=%d revents=0x%x", stopFd, (unsigned int)fds[1].revents);
+        return ERROR;
+    }
+    // check 
+    if ((fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        Debug(0, "Linux hardware timerfd poll error: timerfd=%d revents=0x%x", timerFd, (unsigned int)fds[0].revents);
+        return ERROR;
+    }
+    // done
+    if ((fds[0].revents & POLLIN) == 0) {
+        Debug(0, "Linux hardware timer poll returned without timer event: timerfd=%d revents=0x%x stopRevents=0x%x",
+              timerFd, (unsigned int)fds[0].revents, (unsigned int)fds[1].revents);
+        return ERROR;
+    }
+    
+    // POSIX pattern to restart after signal interrupt (count = -1)
+    do {
+        count = read(timerFd, &expirations, sizeof(expirations));
+    } while (count < 0 && errno == EINTR && fbIntSigFlag == 0);
+
+    if (fbIntSigFlag != 0) {
+        Debug(2, "%s", "Linux hardware timer expiration ignored during shutdown");
+        return ERROR;
+    }
+    if (count < 0) {
+        Debug(0, "Linux hardware timerfd read failed: timerfd=%d count=%ld errno=%d (%s)", timerFd, (long)count, errno, strerror(errno));
+        return ERROR;
+    }
+    // double check if result fits 
+    if (count != (ssize_t)sizeof(expirations)) {
+        Debug(0, "Linux hardware timerfd short read: timerfd=%d count=%ld expected=%lu", timerFd, (long)count, (unsigned long)sizeof(expirations));
+        return ERROR;
+    }
+    if (expirations == 0u) {
+        Debug(0, "Linux hardware timerfd returned zero expirations: timerfd=%d", timerFd);
+        return ERROR;
+    }
+
+    if (expirations > 1u) {
+        fbTriggerConfigLockInit();
+        epicsMutexLock(fbTriggerConfigLock);
+        fbHardwareTriggerOverruns += (unsigned long)(expirations - 1u);
+#ifndef NODEBUG
+        totalOverruns = fbHardwareTriggerOverruns;
+#endif
+        epicsMutexUnlock(fbTriggerConfigLock);
+        Debug(1, "Linux hardware timer overrun: expirations=%lu missed=%lu total=%lu", (unsigned long)expirations, (unsigned long)(expirations - 1u), totalOverruns);
+    }
+
+    return OK;
+}
+
+static int fbLinuxTimerRequestStop(void)
+{
+    uint64_t value;
+    ssize_t count;
+    int stopFd;
+
+    value = 1u;
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    stopFd = fbLinuxTimer.stopFd;
+    epicsMutexUnlock(fbTriggerConfigLock);
+
+    if (stopFd < 0) {
+        Debug(1, "%s",
+              "Linux hardware timer stop requested while backend is inactive");
+        return ERROR;
+    }
+
+    do {
+        count = write(stopFd, &value, sizeof(value));
+    } while (count < 0 && errno == EINTR);
+
+    if (count == (ssize_t)sizeof(value)) {
+        Debug(2, "Linux hardware timer stop requested: stopfd=%d", stopFd);
+        return OK;
+    }
+    if (count < 0 && errno == EAGAIN) {
+        Debug(3, "Linux hardware timer stop event already pending: stopfd=%d", stopFd);
+        return OK;
+    }
+
+    if (count < 0) {
+        Debug(0, "Linux hardware timer stop request failed: stopfd=%d errno=%d (%s)", stopFd, errno, strerror(errno));
+    } else {
+        Debug(0, "Linux hardware timer stop request whatever unexpected: stopfd=%d count=%ld expected=%lu",
+              stopFd, (long)count, (unsigned long)sizeof(value));
+    }
+    return ERROR;
+}
+
+static void fbLinuxTimerClose(void)
+{
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    fbLinuxTimerCloseLocked();
+    epicsMutexUnlock(fbTriggerConfigLock);
+}
+
+static int fbLinuxAbsoluteWait(double rate)
+{
+    struct timespec now;
+    int status;
+
+    if (rate <= 0.0)
+        return ERROR;
+
+    if (!fbLinuxSoftClock.initialized || fbLinuxSoftClock.rate != rate) {
+        if (clock_gettime(CLOCK_MONOTONIC, &fbLinuxSoftClock.next) != 0)
+            return ERROR;
+        fbLinuxSoftClock.rate = rate;
+        fbLinuxSoftClock.initialized = 1;
+        fbTimespecAddPeriod(&fbLinuxSoftClock.next, rate);
+    }
+
+    do {
+        status = clock_nanosleep(CLOCK_MONOTONIC,
+                                 TIMER_ABSTIME,
+                                 &fbLinuxSoftClock.next,
+                                 NULL);
+    } while (status == EINTR && fbIntSigFlag == 0);
+
+    if (status != 0 || fbIntSigFlag != 0)
+        return ERROR;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return ERROR;
+
+    fbTimespecAddPeriod(&fbLinuxSoftClock.next, rate);
+    while (fbTimespecCompare(&fbLinuxSoftClock.next, &now) <= 0) {
+        fbTimespecAddPeriod(&fbLinuxSoftClock.next, rate);
+        fbTriggerConfigLockInit();
+        epicsMutexLock(fbTriggerConfigLock);
+        fbSoftTriggerOverruns++;
+        epicsMutexUnlock(fbTriggerConfigLock);
+    }
+
+    return OK;
+}
+#endif
+
+static void fbSignalFeedbackCycle(void)
+{
+#if FB_OS_VXWORKS
+    semGive(fbSemBTimer);
+#else
+    epicsEventSignal(fbSignal);
+#endif
+}
+
+static int fbWaitForNextCycle(tfbdrvpar *fbdrvpar)
+{
+#if FB_OS_LINUX
+    int mode;
+    double softRate;
+#endif
+
+    if (fbdrvpar == NULL)
+        return ERROR;
+
+#if FB_OS_VXWORKS
+    if (semTake(fbSemBTimer, WAIT_FOREVER) != OK)
+        return ERROR;
+    return OK;
+#elif FB_OS_LINUX
+    fbGetTriggerConfiguration(&mode, &softRate);
+    if (mode == FB_TRIGGER_MODE_HARDWARE)
+        return fbLinuxTimerWait();
+    if (mode == FB_TRIGGER_MODE_SOFTWARE)
+        return fbLinuxAbsoluteWait(softRate);
+    epicsEventMustWait(fbSignal);
+    return OK;
+#else
+    epicsEventMustWait(fbSignal);
+    return OK;
+#endif
+}
+
+static int fbPrepareTriggerSource(tfbdrvpar *fbdrvpar)
+{
+    int mode;
+    double softRate;
+
+    if (fbdrvpar == NULL)
+        return ERROR;
+
+    fbGetTriggerConfiguration(&mode, &softRate);
+
+#if FB_OS_VXWORKS
+    sysAuxClkDisable();
+    while (semTake(fbSemBTimer, NO_WAIT) == OK) {
+        /* Drain a stale binary-semaphore token before starting. */
+    }
+
+    if (mode == FB_TRIGGER_MODE_HARDWARE) {
+        if (sysAuxClkRateSet(fbdrvpar->rate) == ERROR)
+            return ERROR;
+        sysAuxClkEnable();
+    } else if (mode == FB_TRIGGER_MODE_SOFTWARE) {
+        if (fbIntSoftTriggerDelay < 1 || softRate <= 0.0)
+            return ERROR;
+    }
+#else
+#if FB_OS_LINUX
+    fbLinuxSoftClock.initialized = 0;
+    if (mode == FB_TRIGGER_MODE_HARDWARE)
+        return fbLinuxTimerStart(fbdrvpar->rate);
+#endif
+    if (mode == FB_TRIGGER_MODE_SOFTWARE && softRate <= 0.0)
+        return ERROR;
+#endif
+
+    return OK;
+}
+
+static void fbStopTriggerSource(void)
+{
+#if FB_OS_VXWORKS
+    sysAuxClkDisable();
+#elif FB_OS_LINUX
+    fbLinuxTimerClose();
+    fbLinuxSoftClock.initialized = 0;
+#endif
+}
 
 void fbPrintSemaphoreError(int error)
 {
@@ -109,13 +715,14 @@ void fbPrintSemaphoreError(int error)
 */
 int fbInit(short inpcard, short inpsignal, short outcard, short outsignal, short inode, short onode, int rate, int priority)
 {
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
+#if FB_OS_VXWORKS
     STATUS taskalive;
-    int options, connected;
+    int options;
+    int connected;
 #endif
     tfbdrvset *fbdrvset;
     tfbdrvpar *fbdrvpar;
-    int status = 0;
+    int status;
     sem_t *sstatus;
 
     if (pfbDrvDset == NULL) {
@@ -146,55 +753,84 @@ int fbInit(short inpcard, short inpsignal, short outcard, short outsignal, short
         Debug(0, "Priority out of range: priority = %d", priority);
         return ERROR;
     }
+
     fbdrvset = pfbDrvDset;
     fbdrvpar = pfbDrvDset->parameter;
+    status = OK;
+
     if (fb_initialized == 0) {
-        fb_initialized = 1;
-        /* Disable the timer */
+        fbTriggerConfigLockInit();
         fbIntSigFlag = 0;
-        sstatus = sem_open(FB_SEM_NAME, O_CREAT | O_EXCL, S_IRUSR | S_IWUSR, 0);
+
+        sstatus = sem_open(FB_SEM_NAME, O_CREAT, S_IRUSR | S_IWUSR, 0);
         if (sstatus == SEM_FAILED) {
-            Debug(1, "Could not creat semaphore: %s %p", FB_SEM_NAME, sstatus);
-            if (errno == EEXIST) {
-                Debug(1, "Semaphore already exists: %p", sstatus);
-            } else
-                return ERROR;
+            fbPrintSemaphoreError(errno);
+            return ERROR;
         }
-        // Slow triggering or without hardware clock
-        epicsThreadCreate("tFbTrigger",
-                          epicsThreadPriorityHigh, epicsThreadGetStackSize(epicsThreadStackSmall), (EPICSTHREADFUNC) fbTriggerLoop, NULL);
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
-        /* Check if Feedback is already running */
+        sem_close(sstatus);
+
+#if FB_OS_VXWORKS
         if ((taskalive = taskIdVerify(fbIntTaskId)) == OK) {
             logMsg("Task ID %d already active (Feedback Task)\n", fbIntTaskId, 0, 0, 0, 0, 0);
-            return (ERROR);
+            return ERROR;
         }
+
         sysAuxClkDisable();
         fbSemBTimer = semBCreate(SEM_Q_FIFO, SEM_EMPTY);
+        if (fbSemBTimer == NULL) {
+            logMsg("Unable to create feedback cycle semaphore\n", 0, 0, 0, 0, 0, 0);
+            return ERROR;
+        }
+
+        epicsThreadCreate("tFbTrigger",
+                          epicsThreadPriorityHigh,
+                          epicsThreadGetStackSize(epicsThreadStackSmall),
+                          (EPICSTHREADFUNC)fbTriggerLoop,
+                          NULL);
+
         if (fb_common_vxfbtask == 1)
             options = VX_FP_TASK;
         else
             options = 0x80;
-        if ((fbIntTaskId = taskSpawn("tFB", priority, options, 20000,
-                                     (FUNCPTR) fbLoop, (int)fbdrvset, (int)fbdrvpar, 0, 0, 0, 0, 0, 0, 0, 0)) == ERROR)
+
+        fbIntTaskId = taskSpawn("tFB", priority, options, 20000,
+                                (FUNCPTR)fbLoop,
+                                (int)fbdrvset, (int)fbdrvpar,
+                                0, 0, 0, 0, 0, 0, 0, 0);
+        if (fbIntTaskId == ERROR) {
             logMsg("ERROR while task spawn tFB(%d)\n", fbIntTaskId, 0, 0, 0, 0, 0);
-        else
-            logMsg("Task ID %d spawned (tFB)\n", fbIntTaskId, 0, 0, 0, 0, 0);
-        logMsg("Setting sysAuxClk rate to %d Hz.\n", rate, 0, 0, 0, 0, 0);
+            return ERROR;
+        }
+        logMsg("Task ID %d spawned (tFB)\n", fbIntTaskId, 0, 0, 0, 0, 0);
+
         taskDelay(100);
         if (sysAuxClkRateSet(rate) == ERROR) {
             logMsg("ERROR while sysAuxClkRateSet(%d)\n", rate, 0, 0, 0, 0, 0);
-            return (ERROR);
+            return ERROR;
         }
-        if ((connected = sysAuxClkConnect((FUNCPTR) fbauxclkhandler, 0)) == ERROR) {
+        connected = sysAuxClkConnect((FUNCPTR)fbauxclkhandler, 0);
+        if (connected == ERROR) {
             logMsg("ERROR while sysAuxClkConnect\n", 0, 0, 0, 0, 0, 0);
-            return (ERROR);
+            return ERROR;
         }
-#else                           /* do not __USE_FAST_VXWORKS_SYS_AUX_CLOCK__ */
+#else
         fbSignal = epicsEventMustCreate(epicsEventEmpty);
-        epicsThreadCreate("tFeedback", epicsThreadPriorityHigh, epicsThreadGetStackSize(epicsThreadStackBig), (EPICSTHREADFUNC) fbLoop, NULL);
-#endif                          /* if  __USE_FAST_VXWORKS_SYS_AUX_CLOCK__ */
+        epicsThreadCreate("tFeedback",
+                          epicsThreadPriorityHigh,
+                          epicsThreadGetStackSize(epicsThreadStackBig),
+                          (EPICSTHREADFUNC)fbLoop,
+                          NULL);
+#if !FB_OS_LINUX
+        epicsThreadCreate("tFbTrigger",
+                          epicsThreadPriorityHigh,
+                          epicsThreadGetStackSize(epicsThreadStackSmall),
+                          (EPICSTHREADFUNC)fbTriggerLoop,
+                          NULL);
+#endif
+#endif
+        fb_initialized = 1;
     }
+
     fbdrvpar->inpcard = inpcard;
     fbdrvpar->inpsignal = inpsignal;
     fbdrvpar->outcard = outcard;
@@ -204,18 +840,19 @@ int fbInit(short inpcard, short inpsignal, short outcard, short outsignal, short
     fbdrvpar->rate = rate;
     fbdrvpar->priority = priority;
     fbdrvpar->status = FB_INIT;
+
     if (fbdrvset->configure) {
         Debug(2, "Calling fbdrvset->configure(fbdrvpar->status = %d)", fbdrvpar->status);
-        if ((status = (*fbdrvset->configure) (fbdrvpar)))
+        status = (*fbdrvset->configure)(fbdrvpar);
+        if (status != OK)
             return status;
     }
     if (fbdrvset->init) {
         Debug(2, "Calling fbdrvset->init(fbdrvpar->status = %d)", fbdrvpar->status);
-        status = (*fbdrvset->init) (fbdrvpar);
-        return status;
+        status = (*fbdrvset->init)(fbdrvpar);
     }
 
-    return OK;
+    return status;
 }
 
 int fbDeactivate(void)
@@ -230,8 +867,8 @@ int fbDeactivate(void)
         Debug(0, "Driver parameter list not set %p", pfbDrvDset->parameter);
         return ERROR;
     }
-    if (pfbDrvDset->parameter->status == OK) {
-        Debug(0, "Feedback task running: pfbDrvDset->parameter->status = %d", pfbDrvDset->parameter->status);
+    if (fbLoopRequested != 0) {
+        Debug(0, "%s", "Feedback task is open or starting");
         return ERROR;
     }
     if (pfbDrvDset->deactivate)
@@ -255,14 +892,11 @@ int fbForceDeactivate(double timeout_sec)
     if (pfbDrvDset->parameter == NULL)
         return ERROR;
 
-    /* Stop loop */
-    fbIntSigFlag = 1;
-
-    /* Wake blocked loop */
-    fbTrigger();
+    /* Stop and wake the loop where the selected backend permits it. */
+    fbClose();
 
     /* Wait until fbLoop() leaves active state */
-    while (pfbDrvDset->parameter->status == OK) {
+    while (fbLoopRequested != 0) {
 
         epicsThreadSleep(sleep_ms / 1000.0);
         waited += sleep_ms;
@@ -316,216 +950,224 @@ int fbActivate(int id)
 }
 
 /**
- * @brief fbTriggerLoop
- * Trigger running feedback task periodically. Delay is defined by epicsThreadSleepQuantum() * fbLngSoftTriggerDelay
+ * @brief Software trigger producer used by VxWorks and fallback platforms.
+ *
+ * Linux software triggering is implemented directly in the feedback thread
+ * with CLOCK_MONOTONIC absolute deadlines, so no producer thread is used.
  */
 void fbTriggerLoop(void)
 {
-    int status = OK;
-    double quantum = 2.0;
+#if FB_OS_LINUX
+    return;
+#else
+    int mode;
+    double softRate;
+    double delay;
 
-    for (; /*ever */ ;) {
-        if (fbIntSoftTriggerDelay < 0) {
-            Debug(5, "Wait for fbIntSoftTriggerDelay = %d >= 0", fbIntSoftTriggerDelay);
-            epicsThreadSleep(0.5);
-        } else {
-            quantum = epicsThreadSleepQuantum();
-            Debug(10, "fbTrigger() status = %d, fbIntSoftTriggerDelay=%d * quantum=%f", status, fbIntSoftTriggerDelay, quantum);
-            epicsThreadSleep(quantum * (double)fbIntSoftTriggerDelay);
-            status = fbTrigger();
+    for (;;) {
+        fbGetTriggerConfiguration(&mode, &softRate);
+        if (mode != FB_TRIGGER_MODE_SOFTWARE ||
+            softRate <= 0.0 ||
+            fbIntSoftTriggerDelay < 1) {
+            epicsThreadSleep(0.1);
+            continue;
+        }
+
+        delay = epicsThreadSleepQuantum() *
+                (double)fbIntSoftTriggerDelay;
+        epicsThreadSleep(delay);
+
+        fbGetTriggerConfiguration(&mode, &softRate);
+        if (mode == FB_TRIGGER_MODE_SOFTWARE &&
+            fbLoopRunning != 0 &&
+            pfbDrvDset != NULL &&
+            pfbDrvDset->parameter != NULL &&
+            pfbDrvDset->parameter->status == OK &&
+            fbIntSigFlag == 0) {
+            fbSignalFeedbackCycle();
         }
     }
-    return;
+#endif
 }
 
 /*****************************************************************************/
-/* 
+/*
  NAME
-	fbLoop()
+    fbLoop()
  DESCRIPTION
-	Infinite Loop, This task will never return!!!
+    Feedback task lifecycle loop.
 */
 void fbLoop(void)
 {
-    /* Task Control */
     struct sigaction endTask;
-    int status = OK;
-    int current_rate = -1;
+    int status;
+    int sval;
+    int currentRate;
+    int closeStatus;
     sem_t *sem_des;
-    int sval;                           /* Debug *sem_t */
-    tfbdrvset *fbdrvset = pfbDrvDset;
-    tfbdrvpar *fbdrvpar = pfbDrvDset->parameter;
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
-    int priority = 150;
+    tfbdrvset *fbdrvset;
+    tfbdrvpar *fbdrvpar;
+#if FB_OS_VXWORKS
+    int priority;
 #endif
 
     sem_des = sem_open(FB_SEM_NAME, 0, 0, 0);
     if (sem_des == SEM_FAILED) {
-        Debug(0, "Could not open semaphore %s", FB_SEM_NAME);
         fbPrintSemaphoreError(errno);
+        return;
     }
-    status = sem_getvalue(sem_des, &sval);
-    Debug(2, "Open Semaphore (" FB_SEM_NAME "): \n\t\tsval = %d, \n\t\tstatus = %d", sval, status);
+
     endTask.sa_handler = fbsignalhandler;
     sigemptyset(&endTask.sa_mask);
     endTask.sa_flags = FB_NO_OPTIONS;
     if (sigaction(SIGABRT, &endTask, NULL) == ERROR) {
         Debug(0, "Could not install signal handler %p", fbsignalhandler);
+        sem_close(sem_des);
         return;
     }
-    status = sem_getvalue(sem_des, &sval);
-    Debug(1, "Wait for fbOpen()\nsem_wait (" FB_SEM_NAME "): sval = %d, status = %d", sval, status);
-    status = sem_wait(sem_des);
-    status = sem_getvalue(sem_des, &sval);
-    Debug(2, "Semaphore (" FB_SEM_NAME ") taken: \n\t\tsval = %d, \n\t\tstatus = %d", sval, status);
-        /*-----------------------------------------------------------------------------------*/
-    while (1 == 1) {
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
-        /* Set new parameters */
+
+    for (;;) {
+        sem_getvalue(sem_des, &sval);
+        Debug(2, "Wait for fbOpen(): semaphore value=%d", sval);
+        if (sem_wait(sem_des) != 0) {
+            Debug(0, "sem_wait(" FB_SEM_NAME ") failed: errno=%d", errno);
+            continue;
+        }
+
+        if (fbIntSigFlag != 0) {
+            fbLoopRequested = 0;
+            continue;
+        }
+
+        fbdrvset = pfbDrvDset;
+        if (fbdrvset == NULL || fbdrvset->parameter == NULL) {
+            Debug(0, "%s", "No active feedback plugin after fbOpen()");
+            fbLoopRequested = 0;
+            continue;
+        }
+        fbdrvpar = fbdrvset->parameter;
+        status = OK;
+        currentRate = fbdrvpar->rate;
+
+#if FB_OS_VXWORKS
         fbIntTaskId = taskIdSelf();
-        status = taskPriorityGet(fbIntTaskId, &priority);
-        if (priority != fbdrvpar->priority) {
+        priority = 0;
+        if (taskPriorityGet(fbIntTaskId, &priority) == OK &&
+            priority != fbdrvpar->priority) {
             Debug(1, "Changing feedback priority to %d", fbdrvpar->priority);
-            status = taskPrioritySet(fbIntTaskId, fbdrvpar->priority);
+            taskPrioritySet(fbIntTaskId, fbdrvpar->priority);
         }
-        Debug(1, "Set Rate and enable sysAuxClk: rate: %d\n", current_rate);
-        current_rate = sysAuxClkRateGet();
-        if (fbdrvpar->rate != current_rate)
-            status = sysAuxClkRateSet(fbdrvpar->rate);
 #endif
-        /* Enable clock or open otherwise */
-        if (fbdrvset->open) {
-            if ((*fbdrvset->open) (fbdrvpar) != OK)
-                Debug(0, "ERROR in *fbdrvset->open(), rate=%d", current_rate);
-        }
-/** \todo: is this really necessary?
-        else
-			sysAuxClkEnable();
-*/
-        Debug(1, "Entering inner loop, status = %d", status);
-        fbdrvpar->status = OK;
-        /* Entering Inner Feedback Loop */
-        status = fbInnerLoop(fbdrvset, fbdrvpar);
-        fbdrvpar->status = ERROR;
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
-        sysAuxClkDisable();
-#endif
-        Debug(1, "Exit inner Loop: sysAuxClk disabled, wait for semaphore, status = %d.", status);
-        fbIntSigFlag = 0;
-        /* Stop here until resume */
-        if (fbdrvset->close) {
-            status = (*fbdrvset->close) (fbdrvpar);
+
+        if (fbdrvset->open != NULL) {
+            status = (*fbdrvset->open)(fbdrvpar);
             if (status != OK)
-                Debug(0, "ERROR in *fbdrvset->close() = %d", status);
+                Debug(0, "ERROR in *fbdrvset->open(), rate=%d", currentRate);
         }
-        /* Semaphore ------------------- < wait here > ------------------------------------------- */
-        status = sem_getvalue(sem_des, &sval);
-        Debug(2, "sem_wait (" FB_SEM_NAME "): \n\t\tsval = %d, \n\t\tstatus = %d", sval, status);
-        status = sem_wait(sem_des);
-        status = sem_getvalue(sem_des, &sval);
-        Debug(2, "Semaphore (" FB_SEM_NAME ") taken: \n\t\tsval = %d, \n\t\tstatus = %d", sval, status);
-        if (pfbDrvDset != NULL)
-            fbdrvset = pfbDrvDset;
-        if (pfbDrvDset != NULL)
-            fbdrvpar = pfbDrvDset->parameter;
-    }                                   /*infinite loop */
-}                                       /* void fbLoop() */
+
+        if (status == OK && fbIntSigFlag == 0) {
+            fbLoopRunning = 1;
+            fbdrvpar->status = OK;
+            status = fbPrepareTriggerSource(fbdrvpar);
+            if (status == OK) {
+                Debug(1, "Entering inner loop, trigger mode=%s",
+                      fbGetTriggerModeName(fbCurrentTriggerMode));
+                status = fbInnerLoop(fbdrvset, fbdrvpar);
+            }
+        }
+
+        fbStopTriggerSource();
+        fbdrvpar->status = ERROR;
+
+        if (fbdrvset->close != NULL) {
+            closeStatus = (*fbdrvset->close)(fbdrvpar);
+            if (closeStatus != OK)
+                Debug(0, "ERROR in *fbdrvset->close() = %d", closeStatus);
+        }
+
+        fbLoopRunning = 0;
+        fbLoopRequested = 0;
+        Debug(1, "Feedback loop stopped, status=%d", status);
+    }
+}
 
 /*****************************************************************************/
-/* 
+/*
  NAME
-	fbInnerLoop()
+    fbInnerLoop()
  DESCRIPTION
-	Inner Feedback Loop
+    Execute one input and output callback for each selected trigger.
  RETURNS
- 	OK or ERROR
+    OK or ERROR
 */
-int fbInnerLoop(tfbdrvset * fbdrvset, tfbdrvpar * fbdrvpar)
+int fbInnerLoop(tfbdrvset *fbdrvset, tfbdrvpar *fbdrvpar)
 {
-    int status = 0;
+    int status;
+    int waitStatus;
     INTSUPFUN *InputNodeFunction;
     INTSUPFUN *OutputNodeFunction;
     INTSUPFUN inFunc;
     INTSUPFUN outFunc;
 
-    if (fbdrvset == NULL) {
-        return ERROR;
-    }
+    status = OK;
 
-    if (fbdrvpar == NULL) {
+    if (fbdrvset == NULL || fbdrvpar == NULL)
         return ERROR;
-    }
 
     if (fbdrvpar->inode < 0 || fbdrvpar->inode > FB_MAX_NODES) {
         Debug(0, "fbInnerLoop: invalid inode=%d", fbdrvpar->inode);
         return ERROR;
     }
-
     if (fbdrvpar->onode < 0 || fbdrvpar->onode > FB_MAX_NODES) {
         Debug(0, "fbInnerLoop: invalid onode=%d", fbdrvpar->onode);
         return ERROR;
     }
 
-    InputNodeFunction = (INTSUPFUN *) & (fbdrvset->input_node1);
-    OutputNodeFunction = (INTSUPFUN *) & (fbdrvset->output_node1);
-
+    InputNodeFunction = (INTSUPFUN *)&fbdrvset->input_node1;
+    OutputNodeFunction = (INTSUPFUN *)&fbdrvset->output_node1;
     inFunc = InputNodeFunction[fbdrvpar->inode];
     outFunc = OutputNodeFunction[fbdrvpar->onode];
-
-    Debug(2, "fbInnerLoop: inode=%d onode=%d inFunc=%p outFunc=%p", fbdrvpar->inode, fbdrvpar->onode, inFunc, outFunc);
 
     if (inFunc == NULL) {
         Debug(0, "fbInnerLoop: NULL input callback inode=%d", fbdrvpar->inode);
         return ERROR;
     }
-
     if (outFunc == NULL) {
         Debug(0, "fbInnerLoop: NULL output callback onode=%d", fbdrvpar->onode);
         return ERROR;
     }
 
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
-    semTake(fbSemBTimer, WAIT_FOREVER);
-#else
-    epicsEventMustWait(fbSignal);
-#endif
-
     fbLngCtrCatcher = 0;
 
     while (status != ERROR && fbIntSigFlag == 0) {
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
-        semTake(fbSemBTimer, WAIT_FOREVER);
-#else
-        epicsEventMustWait(fbSignal);
-#endif
+        waitStatus = fbWaitForNextCycle(fbdrvpar);
+        if (waitStatus != OK) {
+            if (fbIntSigFlag != 0)
+                break;
+            status = ERROR;
+            break;
+        }
+        if (fbIntSigFlag != 0)
+            break;
 
         fbLngCtrHandler++;
 
         status = inFunc(fbdrvpar);
-
         if (status == OK)
             status = outFunc(fbdrvpar);
     }
 
-    Debug(1, "Suspending feedback task. " "fbLngCtrHandler=%ld status=%d", fbLngCtrHandler, status);
-
+    Debug(1, "Suspending feedback task. fbLngCtrHandler=%ld status=%d",
+          fbLngCtrHandler, status);
     return status;
 }
 
 /*****************************************************************************/
-/* 
- NAME
-	fbauxclkhandler()
- DESCRIPTION
-	Interupt service routine for sysAuxClk.
-*/
+/* VxWorks sysAuxClk interrupt handler. */
 void fbauxclkhandler(int arg)
-{                                       /* sysAuxClk interrupt handler code */
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
-    semGive(fbSemBTimer);
-#else
-    epicsEventSignal(fbSignal);
-#endif
+{
+    (void)arg;
+    fbSignalFeedbackCycle();
 }
 
 /*****************************************************************************/
@@ -533,16 +1175,17 @@ void fbauxclkhandler(int arg)
  NAME
 	fbsignalhandler()
  DESCRIPTION
-	Interupt service routine for sysAuxClk.
+	Stop request signal handler.
 */
 void fbsignalhandler(int signal)
 {
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
+#if FB_OS_VXWORKS
+    (void)signal;
     logMsg("fbsignalhandler: Abort signal received!\n", 0, 0, 0, 0, 0, 0);
 #else
-    Debug(0, "fbsignalhandler: Abort signal received! %d", signal)
+    Debug(0, "fbsignalhandler: Abort signal received! %d", signal);
 #endif
-        fbIntSigFlag = 1;
+    fbIntSigFlag = 1;
 }
 
 /*****************************************************************************/
@@ -558,7 +1201,15 @@ int fbpr(void)
     int sval;
     int status;
     int i;
-
+    int mode;
+    double requestedRate;
+    double effectiveRate;
+    unsigned long softOverruns;
+    unsigned long hardwareOverruns;
+#if FB_OS_LINUX
+    int linuxTimerActive;
+    int linuxTimerRate;
+#endif
     tfbdrvset *fbdrvset;
     tfbdrvpar *fbdrvpar;
 
@@ -568,112 +1219,155 @@ int fbpr(void)
     printf("Changeset Id: %s\n", HGVERSION);
     printf("and date: %s\n", FB_TIMESTAMP);
     printf("***********************************************************\n");
-    printf("Supported feeback rates from %d Hz to %d Hz\n", FB_MIN_RATE, FB_MAX_RATE);
+    printf("Supported feedback rates from %d Hz to %d Hz\n", FB_MIN_RATE, FB_MAX_RATE);
+
     fbdrvset = pfbDrvDset;
     if (fbdrvset == NULL) {
         printf("No active feedback support module.\n");
         return OK;
     }
-    fbdrvpar = pfbDrvDset->parameter;
+    fbdrvpar = fbdrvset->parameter;
     if (fbdrvpar == NULL) {
         printf("No active feedback support module parameter list.\n");
         return OK;
     }
+
     printf("Registered feedback devices:\n");
     for (i = 0; i < FB_MAX_MEMBERS; i++) {
-        if (feedbackPluginList[i] != NULL) {
-            if (feedbackPluginList[i]->name != NULL) {
-                printf("\t%d: %s\n", i, feedbackPluginList[i]->name);
-            }
-        }
+        if (feedbackPluginList[i] != NULL &&
+            feedbackPluginList[i]->name != NULL)
+            printf("\t%d: %s\n", i, feedbackPluginList[i]->name);
     }
+
     printf("Current Feedback Device: %s\n", fbdrvset->name);
     printf("Current Device Report:\n");
     if (fb_initialized == 0) {
         printf("Module not initialized.\n");
         return ERROR;
     }
-    if (fbdrvset == NULL) {
-        printf("Function set not available.\n");
-        return ERROR;
+    if (fbdrvset->report != NULL) {
+        status = (*fbdrvset->report)(fbdrvpar);
+        if (status != OK)
+            Debug(0, "ERROR in *fbdrvset->report() = %p", fbdrvset->report);
     }
-    if (fbdrvpar == NULL) {
-        printf("Parameter set not available.\n");
-        return ERROR;
-    }
-    if (fbdrvset->report) {
-        status = (*fbdrvset->report) (fbdrvpar);
-        if (status != OK) {
-            Debug(0, "ERROR in *fbdrvset->report() = %p\n", fbdrvset->report);
-        }
-    }
+
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    mode = fbCurrentTriggerMode;
+    requestedRate = fbSoftTriggerRequestedRate;
+    effectiveRate = fbSoftTriggerEffectiveRate;
+    softOverruns = fbSoftTriggerOverruns;
+    hardwareOverruns = fbHardwareTriggerOverruns;
+#if FB_OS_LINUX
+    linuxTimerActive = (fbLinuxTimer.timerFd >= 0);
+    linuxTimerRate = fbLinuxTimer.rate;
+#endif
+    epicsMutexUnlock(fbTriggerConfigLock);
+
     printf("********************\n");
     printf("Feedback Task:\n");
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
+#if FB_OS_VXWORKS
     printf("\tfbIntTaskId = %d\n", fbIntTaskId);
 #endif
+    printf("\ttrigger mode = %d (%s)\n", mode, fbGetTriggerModeName(mode));
+    printf("\thardware rate = %d Hz\n", fbdrvpar->rate);
+    printf("\tsoft requested rate = %.6f Hz\n", requestedRate);
+    printf("\tsoft effective rate = %.6f Hz\n", effectiveRate);
+    printf("\tsoft trigger overruns = %lu\n", softOverruns);
+#if FB_OS_LINUX
+    printf("\tLinux Hardware backend = timerfd(CLOCK_MONOTONIC)\n");
+    printf("\tLinux timerfd active = %s\n",
+           linuxTimerActive ? "yes" : "no");
+    printf("\tLinux timerfd rate = %d Hz\n", linuxTimerRate);
+    printf("\tLinux timerfd overruns = %lu\n", hardwareOverruns);
+#else
+    (void)hardwareOverruns;
+#endif
+    printf("\tfbIntSoftTriggerDelay = %d\n", fbIntSoftTriggerDelay);
     printf("\tfbIntSigFlag = %d\n", fbIntSigFlag);
     printf("\tfbLngCtrHandler = %ld\n", fbLngCtrHandler);
     printf("\tfbLngCtrCatcher = %ld\n", fbLngCtrCatcher);
-    printf("\tfbIntSoftTriggerDelay = %d\n", fbIntSoftTriggerDelay);
     printf("\tfb_common_debug = %d\n", fb_common_debug);
     printf("\tfb_initialized = %d\n", fb_initialized);
+
     sem_des = sem_open(FB_SEM_NAME, 0, 0, 0);
+    if (sem_des == SEM_FAILED) {
+        fbPrintSemaphoreError(errno);
+        return ERROR;
+    }
     status = sem_getvalue(sem_des, &sval);
-    printf("Semaphore FB_SEM_NAME: \n\t\tsval = %d, \n\t\tstatus = %d\n", sval, status);
-    status = sem_close(sem_des);
+    printf("Semaphore FB_SEM_NAME: value=%d status=%d\n", sval, status);
+    sem_close(sem_des);
     return status;
 }
 
 /*****************************************************************************/
-/*! 
- NAME
-	fbClose()
- DESCRIPTION
-	Stop Feedback Loop Task.
-*/
+/* Request the active feedback loop to stop. */
 int fbClose(void)
 {
-    /* XXX task crashed hier: 
-       if (kill(fbIntTaskId, SIGABRT) == ERROR)
-       {
-       logMsg("Task ID invalid.\n",0,0,0,0,0,0);
-       return (ERROR);
-       }
-     */
-    /* XXX  workaround: */
+    int mode;
+
+    if (pfbDrvDset == NULL || pfbDrvDset->parameter == NULL)
+        return ERROR;
+    if (fbLoopRequested == 0)
+        return OK;
+
     fbIntSigFlag = 1;
-    return (OK);
+    if (fbLoopRunning == 0)
+        return OK;
+
+    fbGetTriggerConfiguration(&mode, NULL);
+#if FB_OS_LINUX
+    if (mode == FB_TRIGGER_MODE_HARDWARE) {
+        if (fbLinuxTimerRequestStop() != OK)
+            Debug(0, "%s", "Cannot wake Linux timerfd backend");
+    } else if (mode == FB_TRIGGER_MODE_MANUAL) {
+        fbSignalFeedbackCycle();
+    }
+#else
+    (void)mode;
+    if (fb_initialized != 0)
+        fbSignalFeedbackCycle();
+#endif
+    return OK;
 }
 
 /*****************************************************************************/
-/*! 
- NAME
-	fbOpen()
- DESCRIPTION
-	Start Feedback.
-*/
+/* Start or resume the feedback loop. */
 int fbOpen(void)
 {
-    int sval;
     int status;
+    int mode;
+    double softRate;
     sem_t *sem_des;
-    if (pfbDrvDset == NULL)
-        return (ERROR);
-    if (pfbDrvDset->parameter == NULL)
-        return (ERROR);
 
+    if (pfbDrvDset == NULL || pfbDrvDset->parameter == NULL)
+        return ERROR;
+    if (fb_initialized == 0)
+        return ERROR;
+    if (fbLoopRequested != 0)
+        return ERROR;
+
+    fbGetTriggerConfiguration(&mode, &softRate);
+    if (mode == FB_TRIGGER_MODE_SOFTWARE && softRate <= 0.0) {
+        Debug(0, "%s", "Software trigger mode requires a positive SOFTTRIGGERRATE");
+        return ERROR;
+    }
+
+    fbIntSigFlag = 0;
+    fbLoopRequested = 1;
     sem_des = sem_open(FB_SEM_NAME, 0, 0, 0);
     if (sem_des == SEM_FAILED) {
-        Debug(0, "Could not open semaphore %s", FB_SEM_NAME);
+        fbLoopRequested = 0;
         fbPrintSemaphoreError(errno);
+        return ERROR;
     }
-    status = sem_getvalue(sem_des, &sval);
-    Debug(2, "Semaphore : \n\t\tsval = %d, \n\t\tstatus = %d\n", sval, status);
     status = sem_post(sem_des);
+    sem_close(sem_des);
     Debug(2, "Start Feedback Task, status = %d", status);
-    status = sem_close(sem_des);
-    return (status);
+    if (status != 0)
+        fbLoopRequested = 0;
+    return status == 0 ? OK : ERROR;
 }
 
 /*****************************************************************************/
@@ -729,7 +1423,8 @@ int fbConfigure(short inpcard, short inpsignal, short outcard, short outsignal, 
     pfbdrvpar->outsignal = outsignal;
     pfbdrvpar->inode = inode;
     pfbdrvpar->onode = onode;
-    pfbdrvpar->rate = rate;
+    if (fbSetRate(rate) != OK)
+        return ERROR;
     pfbdrvpar->priority = priority;
     pfbdrvpar->status = FB_CONFIGURE;   /* call configure(status = after) */
     if (fbdrvset->configure) {
@@ -944,47 +1639,152 @@ int fbGetRate(int *rate)
 int fbSetRate(int rate)
 {
     tfbdrvpar *pfbdrvpar;
+    int mode;
 
     if (pfbDrvDset == NULL)
         return ERROR;
     pfbdrvpar = pfbDrvDset->parameter;
-    if (pfbdrvpar == NULL) {
-        return (ERROR);
-    }
+    if (pfbdrvpar == NULL)
+        return ERROR;
     if (rate > FB_MAX_RATE || rate < FB_MIN_RATE) {
-        Debug(2, "Rate out of range! %d < RATE < %d", FB_MIN_RATE, FB_MAX_RATE);
-        return (ERROR);
+        Debug(2, "Rate out of range! %d <= RATE <= %d", FB_MIN_RATE, FB_MAX_RATE);
+        return ERROR;
     }
+
+    fbGetTriggerConfiguration(&mode, NULL);
+#if FB_OS_VXWORKS
+    if (mode == FB_TRIGGER_MODE_HARDWARE &&
+        fbLoopRunning != 0) {
+        if (sysAuxClkRateSet(rate) == ERROR)
+            return ERROR;
+    }
+#elif FB_OS_LINUX
+    if (mode == FB_TRIGGER_MODE_HARDWARE &&
+        fbLoopRunning != 0) {
+        if (fbLinuxTimerSetRate(rate) != OK)
+            return ERROR;
+    }
+#else
+    (void)mode;
+#endif
     pfbdrvpar->rate = rate;
-    return (OK);
+    return OK;
 }
 
 int fbSetSoftTriggerRate(double rate)
 {
-    double t;
-    int qs;
+    double quantum;
+    double period;
+    double effectiveRate;
+    int delayQuanta;
 
-    if (rate == 0.0) {
-        Debug(0, "ERROR: rate = %f", rate);
-        fbIntSoftTriggerDelay = -1;
+    if (rate <= 0.0 || rate > (double)FB_MAX_RATE) {
+        Debug(0, "Software trigger rate out of range: %f", rate);
         return ERROR;
     }
-    t = 1.0 / rate;
-    qs = (int)(t / epicsThreadSleepQuantum());
-    if (qs > 0) {
-        fbIntSoftTriggerDelay = qs;
-    } else {
-        fbIntSoftTriggerDelay = 1;
-    }
+
+    quantum = epicsThreadSleepQuantum();
+    if (quantum <= 0.0)
+        return ERROR;
+
+    period = 1.0 / rate;
+    delayQuanta = (int)(period / quantum + 0.5);
+    if (delayQuanta < 1)
+        delayQuanta = 1;
+    effectiveRate = 1.0 / (quantum * (double)delayQuanta);
+
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    fbSoftTriggerRequestedRate = rate;
+#if FB_OS_LINUX
+    fbSoftTriggerEffectiveRate = rate;
+    (void)effectiveRate;
+    Debug(0, "rate: %f", fbSoftTriggerEffectiveRate);
+#else
+    fbSoftTriggerEffectiveRate = effectiveRate;
+    Debug(0, "rate: %f", fbSoftTriggerEffectiveRate);
+#endif
+    fbIntSoftTriggerDelay = delayQuanta;
+    fbSoftTriggerOverruns = 0ul;
+    epicsMutexUnlock(fbTriggerConfigLock);
+
     return OK;
 }
 
 int fbGetSoftTriggerRate(double *rate)
 {
-    double t;
+    if (rate == NULL)
+        return ERROR;
 
-    t = fbIntSoftTriggerDelay * epicsThreadSleepQuantum();
-    *rate = 1.0 / t;
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    *rate = fbSoftTriggerEffectiveRate;
+    epicsMutexUnlock(fbTriggerConfigLock);
+    return *rate > 0.0 ? OK : ERROR;
+}
+
+int fbSetTriggerMode(int mode)
+{
+    double softRate;
+
+    if (mode < FB_TRIGGER_MODE_HARDWARE ||
+        mode > FB_TRIGGER_MODE_MANUAL)
+        return ERROR;
+
+    if (fbLoopRequested != 0) {
+        Debug(0, "%s", "Close the feedback loop before changing trigger mode");
+        return ERROR;
+    }
+
+    fbGetTriggerConfiguration(NULL, &softRate);
+    if (mode == FB_TRIGGER_MODE_SOFTWARE && softRate <= 0.0) {
+        Debug(0, "%s", "Set a positive software trigger rate first");
+        return ERROR;
+    }
+
+#if FB_OS_VXWORKS
+    if (fb_initialized != 0)
+        sysAuxClkDisable();
+#endif
+
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    fbCurrentTriggerMode = mode;
+    fbSoftTriggerOverruns = 0ul;
+    fbHardwareTriggerOverruns = 0ul;
+    epicsMutexUnlock(fbTriggerConfigLock);
+    return OK;
+}
+
+int fbGetTriggerMode(int *mode)
+{
+    if (mode == NULL)
+        return ERROR;
+    fbGetTriggerConfiguration(mode, NULL);
+    return OK;
+}
+
+int fbGetSoftTriggerOverruns(unsigned long *overruns)
+{
+    if (overruns == NULL)
+        return ERROR;
+
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    *overruns = fbSoftTriggerOverruns;
+    epicsMutexUnlock(fbTriggerConfigLock);
+    return OK;
+}
+
+int fbGetHardwareTriggerOverruns(unsigned long *overruns)
+{
+    if (overruns == NULL)
+        return ERROR;
+
+    fbTriggerConfigLockInit();
+    epicsMutexLock(fbTriggerConfigLock);
+    *overruns = fbHardwareTriggerOverruns;
+    epicsMutexUnlock(fbTriggerConfigLock);
     return OK;
 }
 
@@ -1015,7 +1815,7 @@ int fbSetPriority(int priority)
     pfbdrvpar = pfbDrvDset->parameter;
     if (pfbdrvpar == NULL)
         return (ERROR);
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
+#if FB_OS_VXWORKS
     if (priority > 254 || priority < 0) {
         Debug(2, "Priority out of range! %d < PRIORITY < %d", 254, 0);
         return ERROR;
@@ -1023,8 +1823,9 @@ int fbSetPriority(int priority)
     pfbdrvpar->priority = priority;
     return OK;
 #else
+    (void)priority;
     return ERROR;
-#endif                          /* if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__ */
+#endif                          /* if FB_OS_VXWORKS */
 }
 
 /*****************************************************************************/
@@ -1037,21 +1838,29 @@ int fbSetPriority(int priority)
     pfbDrvDset->parameter.status to FB_NOT_READY
 */
 int fbTrigger(void)
-{                                       /* like sysAuxClk interrupt handler code */
+{
     tfbdrvpar *pfbdrvpar;
+    int mode;
 
     if (pfbDrvDset == NULL)
         return ERROR;
     pfbdrvpar = pfbDrvDset->parameter;
     if (pfbdrvpar == NULL)
-        return (ERROR);
-    if (pfbdrvpar->status != FB_NOT_READY) {
-#if __USE_FAST_VXWORKS_SYS_AUX_CLOCK__
-        semGive(fbSemBTimer);
-#else
-        epicsEventSignal(fbSignal);
-#endif
-        return OK;
-    } else
         return ERROR;
+    if (fbLoopRunning == 0 || pfbdrvpar->status != OK)
+        return ERROR;
+
+    fbGetTriggerConfiguration(&mode, NULL);
+#if FB_OS_LINUX
+    if (mode != FB_TRIGGER_MODE_MANUAL) {
+        Debug(2, "%s",
+              "fbTrigger is available only in Linux Manual mode; Hardware uses timerfd and Software uses the absolute wait");
+        return ERROR;
+    }
+#else
+    (void)mode;
+#endif
+
+    fbSignalFeedbackCycle();
+    return OK;
 }

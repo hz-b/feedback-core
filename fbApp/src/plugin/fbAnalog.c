@@ -14,9 +14,11 @@
 #include <registryFunction.h>
 #include <epicsExport.h>
 #include <epicsMutex.h>
+#include <epicsTime.h>
 #include <iocsh.h>
 
 #include "fbCore.h"
+extern long fbLngCtrHandler;
 #include "fbAnalog.h"
 #include "fbRegistry.h"
 #include "devFeedback.h"
@@ -216,13 +218,34 @@ int fbAnalogGetFilterDelay(double *delaySamples, unsigned short channel)
 static int fbAnalogDefaultInputUpdate(unsigned short channel, double *value)
 {
     static double testValue[FB_ANALOG_MAX_CHANNELS];
+    epicsTimeStamp timestamp;
 
     if (value == NULL || channel >= FB_ANALOG_MAX_CHANNELS) {
         Debug(0, "value=%p, channel=%d", value, channel);
         return ERROR;
     }
-    testValue[channel] += 0.001 * (double)(channel + 1);
-    *value = testValue[channel];
+
+    switch (channel) {
+    case 0:
+        if (epicsTimeGetCurrent(&timestamp) != epicsTimeOK) {
+            Debug(9, "epicsTimeGetCurrent failed, fbLngCtrHandler=%ld", fbLngCtrHandler);
+            *value = (double)fbLngCtrHandler++;
+            return ERROR;
+        }
+
+        *value = (double)timestamp.secPastEpoch + (double)timestamp.nsec * 1.0e-9;
+        break;
+
+    case 1:
+        *value = (double)fbLngCtrCatcher++;
+        break;
+
+    default:
+        testValue[channel] += 0.001 * (double)(channel + 1);
+        *value = testValue[channel];
+        break;
+    }
+
     return OK;
 }
 
